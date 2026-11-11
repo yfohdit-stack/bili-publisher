@@ -1,0 +1,5 @@
+flask>=2.3
+bilibili-api-python>=17.0
+segno>=1.5
+curl_cffi>=0.6
+httpx>=0.24
