@@ -13,18 +13,22 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from . import ledger, media, quota, season, store
+from . import ledger, media, notify, quota, season, store
 from .channels import biliup_cli, official
 
-# 定时发布：距现在 >= 这个间隔就直接交给B站定时（B站要求至少提前 4 小时，留 10 分钟余量）
-SCHEDULE_MIN_AHEAD = 4 * 3600 + 600
+# 定时发布：距发布时间 >= 这个间隔就把 dtime 直接交给B站定时队列。
+# B站定时实际只要求至少提前 5 分钟（旧版误以为要提前 4 小时），这里留一倍
+# 余量取 10 分钟：10 分钟以上交给B站定时；不足 10 分钟的由本地候到点再即时投放。
+SCHEDULE_MIN_AHEAD = 10 * 60
 POLL_INTERVAL = 2.0
 
 # 上传节流：最近 10 个视频里，第 10 个若仍在 10 分钟内则等它滑出窗口再放行
 WINDOW_SECS = 600
 WINDOW_MAX = 10
 RISK_WAIT = 120            # 触发B站验证码：等 2 分钟再试（单P/多P 一致，不再分叉）
-# 限流按接口来源分流：封面 -702 等 1 分钟；预上传 406/429 等 10 分钟。
+# 限流按接口来源分流：封面 -702 每次等 1 分钟；预上传 406/429 每次等 5 分钟。
+# 406 是「10 分钟内投稿过多」风控窗口，但不必干等满 10 分钟：5 分钟先探一次，
+# 仍被限流就到 10 分钟时间点再探（窗口内共两次机会），连续 3 次才暂停待人工。
 # 这些都是平台窗口问题，不应消耗单个稿件的失败重试次数。
 RATE_WAIT_COVER = 60
 RATE_WAIT_UPLOAD = 300
@@ -50,6 +54,14 @@ _NUM = re.compile(r"\d+(?:\.\d+)?")
 # 取值高于 official.START_TIMEOUT(25 分钟)，官方通道不会误伤。
 STUCK_TIMEOUT = 30 * 60
 WATCHDOG_INTERVAL = 60
+
+# 状态通知：同一事件文案在短时间内重复出现只推一次（限流/额度复查可能连击），
+# 失败日志也做节流，避免 Webhook 挂掉时把总日志刷满。
+NOTIFY_DEDUP_SECS = 20.0
+NOTIFY_FAIL_LOG_GAP = 300.0
+_notify_last: Dict[str, float] = {}
+_notify_lock = threading.Lock()
+_notify_fail_logged_at = 0.0
 
 
 _thread: Optional[threading.Thread] = None
@@ -207,6 +219,12 @@ def pause_for_quota(q: Dict[str, Any]) -> None:
     _quota_resume_at = nxt if nxt > now else 0.0
     _quota_last_check = now       # 刚查过额度，别立刻再打一次接口
     pause(True, "quota")
+    # v103：额度满 / 24h 封禁是「无需人工值守」里最容易卡住的一环，主动推一条。
+    reason = str(q.get("error") or "近 24h 投稿额度已满")
+    when = (f"预计 {time.strftime('%m-%d %H:%M', time.localtime(_quota_resume_at))} 复查额度"
+            if _quota_resume_at else "将按兜底间隔继续复查额度")
+    _notify("quota", "队列已暂停：24h 投稿额度已满 / 封禁",
+            f"{reason}。稿件继续排队不会被丢弃，{when}，腾出空位后自动续投。", "warn")
 
 
 # 额度没算出腾位时刻时的兜底复查间隔；算出时刻之前完全不请求接口。
@@ -234,6 +252,10 @@ def _maybe_resume_quota(now: float) -> bool:
     if q.get("logged_in") and q.get("ok") and not q.get("incomplete"):
         pause(False)
         store.add_global_log("24h 投稿额度已腾出空位，队列自动继续投稿", "ok")
+        # v103：封禁解除 / 额度归零后自动开投，主动推一条，不用再盯浏览器。
+        _notify("resume", "额度已恢复，队列自动继续投稿",
+                "24h 投稿额度已腾出空位（封禁解除或额度归零），队列已自动恢复，"
+                "无需人工点「继续队列」。", "success")
         return True
     nxt = float(q.get("next_release_at") or 0.0)
     _quota_resume_at = nxt if nxt > now else 0.0
@@ -593,7 +615,9 @@ def _rate_limit_backoff(tid: str, task: Dict[str, Any], err: str) -> None:
     store.update_task(tid, status="queued", attempts=int(task.get("attempts") or 0),
                       error=err, speed=0, stage="限流冷却", message=msg)
     _log(tid, f"{msg}：{err[:160]}", "warn")
-    _summary(task, msg, "warn")
+    # 限流走独立的 rate 事件（可单独关），不再让 _summary 重复推一条 task 事件。
+    _summary(task, msg, "warn", push=False)
+    _notify("rate", "投稿被 B站 接口限流", f"{msg}。原始错误：{err[:160]}", "warn")
     _clear_cancel(tid)
 
 
@@ -748,14 +772,18 @@ def _schedule_action(task: Dict[str, Any]) -> str:
     if delta > 15 * 86400:
         return "fail"
     if delta > SCHEDULE_MIN_AHEAD:
-        return "go"      # 远的交给B站定时队列
-    if delta > 600:
-        return "wait"    # 近的本地候着到点
+        return "go"      # 提前量够，带 dtime 交给B站定时队列
+    if delta > 0:
+        return "wait"    # 不足 10 分钟，B站定时来不及，本地候到点再即时投放
     return "go"
 
 
 def _schedule_wait_delay(delta: float) -> float:
-    """定时任务的等待秒数：到点前 10 分钟才进候选，封顶 30 秒以便随时响应取消/暂停。"""
+    """定时任务的等待秒数：到点前 10 分钟才进候选，封顶 30 秒以便随时响应取消/暂停。
+
+    这里的 600 是「进候选窗口」，和 SCHEDULE_MIN_AHEAD（交给B站定时所需提前量）
+    数值恰好相同但语义不同，互不依赖。
+    """
     target = delta - 600 if delta > 600 else delta
     return max(1.0, min(30.0, target))
 
@@ -782,7 +810,7 @@ def _refresh_countdowns() -> None:
         elif remain > SCHEDULE_MIN_AHEAD:
             msg = f"将交给B站定时发布（{time.strftime('%m-%d %H:%M', time.localtime(float(t['publish_at'])))}）"
         else:
-            msg = f"等待到点投放（还剩 {int(remain // 60)} 分钟）"
+            msg = f"距发布不足 10 分钟，等待到点投放（还剩 {int(remain // 60)} 分钟）"
         if msg != (t.get("message") or ""):
             store.set_message(t["id"], msg)
 
@@ -897,10 +925,64 @@ def _reset_stage(task_id: str = "") -> None:
         _last_stage.update({"task_id": task_id, "at": 0.0, "progress": -1.0, "label": ""})
 
 
-def _summary(task: Dict[str, Any], text: str, level: str = "info") -> None:
-    """把稿件最终结果写进总日志（带标题，过程仍在任务日志里）。"""
+def _notify(event: str, title: str, text: str, level: str = "info") -> None:
+    """状态通知入口：没填 Webhook 就完全不触发，发送丢独立线程，失败不阻塞队列。
+
+    调用点（v103）：_summary（投稿结果）、pause_for_quota（额度暂停 / 24h 封禁）、
+    _maybe_resume_quota（封禁解除自动续投）、_rate_limit_backoff（限流卡住）。
+    """
+    try:
+        cfg = store.load_config()
+        opt = notify.normalize(cfg)
+        # 「不填配置就完全不触发」：这里是第一道闸，连线程都不起。
+        if not opt["enabled"] or not opt["url"] or not opt["events"].get(event, True):
+            return
+        key = f"{event}|{title}|{text}"
+        now = time.time()
+        with _notify_lock:
+            if now - _notify_last.get(key, 0.0) < NOTIFY_DEDUP_SECS:
+                return
+            _notify_last[key] = now
+            if len(_notify_last) > 200:
+                _notify_last.clear()
+        th = threading.Thread(target=_notify_send, args=(cfg, event, title, text, level),
+                              daemon=True, name="notify-push")
+        th.start()
+    except Exception:  # noqa: BLE001  通知永远不能影响投稿
+        pass
+
+
+def _notify_send(cfg: Dict[str, Any], event: str, title: str,
+                 text: str, level: str) -> None:
+    """后台线程：真正发一次；失败只做节流式记日志，绝不抛到队列主循环。"""
+    global _notify_fail_logged_at
+    try:
+        r = notify.dispatch(cfg, event, title, text, level)
+        if r.get("sent"):
+            return
+        reason = r.get("reason") or r.get("detail") or "未知原因"
+        if reason in ("状态通知已关闭", "未配置 Webhook 地址", "该事件已关闭推送"):
+            return
+        now = time.time()
+        with _notify_lock:
+            if now - _notify_fail_logged_at < NOTIFY_FAIL_LOG_GAP:
+                return
+            _notify_fail_logged_at = now
+        try:
+            store.add_global_log(f"状态通知推送失败（不影响投稿）：{reason}", "warn")
+        except Exception:
+            pass
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _summary(task: Dict[str, Any], text: str, level: str = "info",
+             push: bool = True) -> None:
+    """把稿件最终结果写进总日志（带标题，过程仍在任务日志里），并按需推送。"""
     title = (task.get("title") or "未命名稿件").strip()[:40]
     store.add_global_log(f"《{title}》{text}", level)
+    if push:
+        _notify("task", f"《{title}》", text, level)
 
 
 def _cleanup_files(task: Dict[str, Any]) -> int:
@@ -1046,16 +1128,16 @@ def _handle(task: Dict[str, Any]) -> float:
             if sched_mode == "local":
                 msg = f"等待到点自动上传（还剩 {_fmt_remain(delta)}）"
             else:
-                msg = f"等待到点投放（还剩 {int(delta // 60)} 分钟）"
+                msg = f"距发布不足 10 分钟，本地候到点投放（还剩 {int(delta // 60)} 分钟）"
             store.update_task(tid, status="waiting_schedule", message=msg)
             return _schedule_wait_delay(delta)
         if action == "block":
             mins = int(float(store.load_config().get("overdue_minutes") or 30))
             store.update_task(tid, status="blocked", finished_at=now,
-                              message=f"已过期超过 {mins} 分钟，未自动投稿，请手动处理",
+                              message=f"本地定时稿件已过期超过 {mins} 分钟，未自动投稿，请手动处理",
                               error="overdue_skipped", speed=0)
-            _log(tid, f"任务已过期超过 {mins} 分钟，按设置拦下", "warn")
-            _summary(task, f"已拦下：过期超过 {mins} 分钟未自动投稿", "warn")
+            _log(tid, f"本地定时稿件已过期超过 {mins} 分钟，按设置拦下", "warn")
+            _summary(task, f"已拦下：本地定时稿件过期超过 {mins} 分钟未自动投稿", "warn")
             return 0.0
 
     with _state_lock:
@@ -1272,8 +1354,9 @@ def _handle(task: Dict[str, Any]) -> float:
         max_attempts = int(task.get("max_attempts") or 2)
         err = f"{type(e).__name__}: {e}"
         # 限流（封面 -702 / 预上传 406、429）与验证码风控是两类问题：前者是平台
-        # 窗口，等 1 或 10 分钟就能续投，不该消耗稿件的失败重试次数；后者才按
-        # 账号冷却。限流判断放在风控前面，避免错误文案交叉时被风控分支吃掉。
+        # 窗口，等 1 或 5 分钟就能再探（406 的 10 分钟窗口内 5min/10min 各探一次），
+        # 不该消耗稿件的失败重试次数；后者才按账号冷却。限流判断放在风控前面，
+        # 避免错误文案交叉时被风控分支吃掉。
         if _rate_kind(err):
             _rate_limit_backoff(tid, task, err)
             return 0.0

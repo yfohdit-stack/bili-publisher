@@ -82,6 +82,9 @@
     if (opts.body) init.body = JSON.stringify(opts.body);
     return fetch(new URL(path, location.origin).href, init).then(async (r) => {
       const data = await r.json().catch(() => ({ ok: false, error: "响应不是 JSON" }));
+      if (r.status === 401) {
+        toast("访问鉴权失败，请用 ?token=你的token 重新打开页面", "err", 6500);
+      }
       if (!r.ok) throw Object.assign(new Error(data.error || ("HTTP " + r.status)), { data });
       return data;
     });
@@ -1466,6 +1469,16 @@
     $("envFfmpeg").innerHTML = env.ffmpeg ? '<span class="pill ok">可用</span>' : '<span class="pill no">未安装</span>';
   }
 
+  function syncNotifyRows() {
+    if ($("notifyChatRow")) $("notifyChatRow").hidden = $("notifyKind").value !== "telegram";
+  }
+
+  function syncAuthRows() {
+    const basic = $("webAuthMode") && $("webAuthMode").value === "basic";
+    if ($("webAuthTokenRow")) $("webAuthTokenRow").hidden = !!basic;
+    if ($("webAuthBasicRow")) $("webAuthBasicRow").hidden = !basic;
+  }
+
   function renderSettings() {
     const c = state.config || {};
     const cookie = c.cookie || {};
@@ -1484,6 +1497,26 @@
     $("cfgBiliupLine").value = c.biliup_line || "";
     $("cfgBiliupCookie").value = c.biliup_cookie_file || "cookies.json";
     $("quotaWindow").textContent = "近 " + (c.quota_hours || 24) + " 小时";
+    // v103：状态通知（Webhook）
+    const nt = c.notify || {};
+    if ($("notifyUrl")) $("notifyUrl").value = nt.url || "";
+    if ($("notifyKind")) $("notifyKind").value = nt.kind || "auto";
+    if ($("notifyChatId")) $("notifyChatId").value = nt.chat_id || "";
+    if ($("notifyEnabled")) $("notifyEnabled").checked = nt.enabled !== false;
+    const ev = nt.events || {};
+    if ($("notifyEvTask")) $("notifyEvTask").checked = ev.task !== false;
+    if ($("notifyEvRate")) $("notifyEvRate").checked = ev.rate !== false;
+    if ($("notifyEvQuota")) $("notifyEvQuota").checked = ev.quota !== false;
+    if ($("notifyEvResume")) $("notifyEvResume").checked = ev.resume !== false;
+    syncNotifyRows();
+    // v103：Web 访问鉴权（token / 密码回显为掩码，保存时后端会忽略掩码）
+    const wa = c.web_auth || {};
+    if ($("webAuthEnabled")) $("webAuthEnabled").checked = !!wa.enabled;
+    if ($("webAuthMode")) $("webAuthMode").value = wa.mode || "token";
+    if ($("webAuthUser")) $("webAuthUser").value = wa.username || "";
+    if ($("webAuthToken")) $("webAuthToken").value = wa.token || "";
+    if ($("webAuthPass")) $("webAuthPass").value = wa.password || "";
+    syncAuthRows();
     $("drawerAccount").textContent = state.account && state.account.logged_in
       ? state.account.uname + "（UID " + state.account.mid + "）" : "未登录";
     $("drawerCookieState").textContent = cookie.set ? "已设置（SESSDATA " + (cookie.sessdata || "") + "）" : "未设置";
@@ -1715,6 +1748,25 @@
           biliup_bin: $("cfgBiliupBin").value.trim() || "biliup",
           biliup_line: $("cfgBiliupLine").value.trim(),
           biliup_cookie_file: $("cfgBiliupCookie").value.trim() || "cookies.json",
+          notify: {
+            enabled: $("notifyEnabled") ? !!$("notifyEnabled").checked : true,
+            url: $("notifyUrl") ? $("notifyUrl").value.trim() : "",
+            kind: $("notifyKind") ? $("notifyKind").value : "auto",
+            chat_id: $("notifyChatId") ? $("notifyChatId").value.trim() : "",
+            events: {
+              task: $("notifyEvTask") ? !!$("notifyEvTask").checked : true,
+              rate: $("notifyEvRate") ? !!$("notifyEvRate").checked : true,
+              quota: $("notifyEvQuota") ? !!$("notifyEvQuota").checked : true,
+              resume: $("notifyEvResume") ? !!$("notifyEvResume").checked : true,
+            },
+          },
+          web_auth: {
+            enabled: $("webAuthEnabled") ? !!$("webAuthEnabled").checked : false,
+            mode: $("webAuthMode") ? $("webAuthMode").value : "token",
+            username: $("webAuthUser") ? $("webAuthUser").value.trim() : "",
+            token: $("webAuthToken") ? $("webAuthToken").value.trim() : "",
+            password: $("webAuthPass") ? $("webAuthPass").value : "",
+          },
         },
       });
       toast("设置已保存", "ok");
@@ -1722,6 +1774,31 @@
       applyBootstrap(r);
     } catch (e) {
       toast(e.message, "err");
+    }
+  }
+
+  async function testNotify() {
+    const btn = $("btnNotifyTest");
+    if (!btn) return;
+    btn.disabled = true;
+    btn.textContent = "发送中…";
+    try {
+      const r = await api("/api/notify/test", {
+        method: "POST",
+        body: {
+          url: $("notifyUrl") ? $("notifyUrl").value.trim() : "",
+          kind: $("notifyKind") ? $("notifyKind").value : "auto",
+          chat_id: $("notifyChatId") ? $("notifyChatId").value.trim() : "",
+        },
+      });
+      toast(r.sent ? "测试通知已发出（" + (r.kind || "raw") + "）"
+                   : "发送失败：" + (r.detail || "未知原因"),
+            r.sent ? "ok" : "err", 5200);
+    } catch (e) {
+      toast("测试失败：" + e.message, "err", 5200);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "发送测试通知";
     }
   }
 
@@ -2367,6 +2444,9 @@
     $("btnSaveSettings").addEventListener("click", saveSettings);
     $("btnSaveCookie").addEventListener("click", saveCookie);
     $("btnCleanNow").addEventListener("click", cleanNow);
+    $("btnNotifyTest").addEventListener("click", testNotify);
+    $("notifyKind").addEventListener("change", syncNotifyRows);
+    $("webAuthMode").addEventListener("change", syncAuthRows);
     // 手机切回浏览器时立刻补一次状态查询，避免后台挂起期间错过结果
     document.addEventListener("visibilitychange", () => {
       resetPollBackoff();

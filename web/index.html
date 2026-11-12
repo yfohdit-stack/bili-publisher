@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>B站投稿台</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23fb7299'/%3E%3Cpath d='M9 10.5v11a1 1 0 0 0 1.5.86l9-5.5a1 1 0 0 0 0-1.72l-9-5.5A1 1 0 0 0 9 10.5z' fill='%23fff'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=102">
+<link rel="stylesheet" href="/static/style.css?v=103">
 </head>
 <body>
 
@@ -97,7 +97,8 @@
     <h1 class="view-title" id="viewTitle">开始今天的投稿</h1>
     <p class="view-sub" id="viewSub">填写稿件、加入队列，程序会按顺序自动上传。账号额度、失败重试与定时发布都在后台替你把关。</p>
   </div>
-  <!-- 接口限流冷却提示：封面 -702 等 1 分钟，预上传 406/429 等 10 分钟 -->
+  <!-- 接口限流冷却提示：封面 -702 每次等 1 分钟；预上传 406/429 每次等 5 分钟，
+       406 的「10 分钟内投稿过多」是风控窗口成因，窗口内 5min / 10min 各探一次 -->
   <div class="rate-banner" id="rateBanner" hidden>
     <div class="rate-ico" aria-hidden="true">!</div>
     <div class="rate-body">
@@ -464,7 +465,7 @@
       </label>
       <label class="checkline">
         <input type="checkbox" id="overdueGuard">
-        <span>定时稿件过期超过 <input class="inline-num" type="number" id="overdueMinutes" min="1" max="10080" step="1" value="30"> 分钟不自动投稿</span>
+        <span>本地定时稿件过期超过 <input class="inline-num" type="number" id="overdueMinutes" min="1" max="10080" step="1" value="30"> 分钟不自动投稿</span>
       </label>
     </div>
 
@@ -542,6 +543,75 @@
       <div class="kv"><span class="k">ffmpeg 抽帧</span><span class="v" id="envFfmpeg">检测中</span></div>
     </div>
 
+    <div class="set-card">
+      <div class="section-title">状态通知（Webhook）</div>
+      <div class="field">
+        <label class="label" for="notifyUrl">Webhook 地址</label>
+        <input class="input" id="notifyUrl" placeholder="留空 = 完全不推送">
+      </div>
+      <div class="field">
+        <label class="label" for="notifyKind">机器人类型</label>
+        <select class="select" id="notifyKind">
+          <option value="auto">自动识别（推荐）</option>
+          <option value="wecom">企业微信机器人</option>
+          <option value="dingtalk">钉钉机器人</option>
+          <option value="feishu">飞书机器人</option>
+          <option value="serverchan">Server酱</option>
+          <option value="telegram">Telegram Bot</option>
+          <option value="raw">通用 JSON（自建 / n8n）</option>
+        </select>
+      </div>
+      <div class="field" id="notifyChatRow" hidden>
+        <label class="label" for="notifyChatId">Telegram chat_id</label>
+        <input class="input" id="notifyChatId" placeholder="例如 -1001234567890">
+      </div>
+      <label class="checkline">
+        <input type="checkbox" id="notifyEnabled" checked>
+        <span>启用推送 <span class="counter">不填地址就完全不触发，推送失败不影响投稿</span></span>
+      </label>
+      <div class="field" style="margin:8px 0 0;">
+        <label class="label">推送哪些事件</label>
+        <label class="checkline"><input type="checkbox" id="notifyEvTask" checked><span>投稿结果（成功 / 失败 / 被拦下）</span></label>
+        <label class="checkline"><input type="checkbox" id="notifyEvRate" checked><span>接口限流 / 队列卡住</span></label>
+        <label class="checkline"><input type="checkbox" id="notifyEvQuota" checked><span>24h 额度满 / 封禁暂停</span></label>
+        <label class="checkline"><input type="checkbox" id="notifyEvResume" checked><span>额度恢复、自动续投</span></label>
+      </div>
+      <div class="field" style="margin-top:8px;">
+        <button class="ghost-btn" id="btnNotifyTest" type="button" style="width:100%;">发送测试通知</button>
+      </div>
+      <div class="hint" style="margin:6px 0 0;">兼容企业微信 / 钉钉 / 飞书 / Server酱 / Telegram；其它地址发通用 JSON（app / event / level / title / text）。</div>
+    </div>
+
+    <div class="set-card">
+      <div class="section-title">Web 访问鉴权</div>
+      <label class="checkline">
+        <input type="checkbox" id="webAuthEnabled">
+        <span>启用访问鉴权 <span class="counter">默认关闭；用 --host 0.0.0.0 暴露到局域网时建议开启</span></span>
+      </label>
+      <div class="field">
+        <label class="label" for="webAuthMode">鉴权方式</label>
+        <select class="select" id="webAuthMode">
+          <option value="token">Token（链接 ?token= 或请求头）</option>
+          <option value="basic">Basic Auth（用户名 / 密码）</option>
+        </select>
+      </div>
+      <div class="field" id="webAuthTokenRow">
+        <label class="label" for="webAuthToken">访问 Token</label>
+        <input class="input" id="webAuthToken" placeholder="启用时必填；显示掩码表示不修改">
+      </div>
+      <div class="field-row" id="webAuthBasicRow" hidden>
+        <div class="field">
+          <label class="label" for="webAuthUser">用户名</label>
+          <input class="input" id="webAuthUser" autocomplete="username">
+        </div>
+        <div class="field">
+          <label class="label" for="webAuthPass">密码</label>
+          <input class="input" id="webAuthPass" type="password" autocomplete="new-password" placeholder="掩码表示不修改">
+        </div>
+      </div>
+      <div class="hint" style="margin:6px 0 0;">开启 Token 后请用 <b>?token=你的token</b> 打开页面，首次校验通过会写入 Cookie，之后无需重复输入。保存后请立即用新链接验证，避免把自己锁在门外。</div>
+    </div>
+
     <div class="save-bar">
       <button class="primary-btn" id="btnSaveSettings" type="button" style="width:100%;">保存设置</button>
     </div>
@@ -550,6 +620,6 @@
 
 <div class="toast-wrap" id="toastWrap"></div>
 
-<script src="/static/app.js?v=102"></script>
+<script src="/static/app.js?v=103"></script>
 </body>
 </html>

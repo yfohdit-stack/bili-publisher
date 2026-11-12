@@ -1,7 +1,10 @@
 """Flask 服务：本地投稿台的 HTTP 接口与页面。"""
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
+import html
 import json
 import os
 import random
@@ -18,7 +21,8 @@ from typing import Any, Dict, List, Tuple
 
 from flask import g, send_file, Flask, Response, jsonify, request, send_from_directory
 
-from . import editor, ledger, login, media, partitions, quota, season, store, topic, worker
+from . import (editor, ledger, login, media, notify, partitions, quota, season,
+               store, topic, worker)
 from .channels import biliup_cli, official
 
 BASE_DIR = store.BASE_DIR
@@ -26,7 +30,7 @@ WEB_DIR = os.path.join(BASE_DIR, "web")
 UPLOAD_DIR = os.path.join(store.DATA_DIR, "uploads")
 COVER_DIR = os.path.join(store.DATA_DIR, "covers")
 
-APP_VERSION = "v102"
+APP_VERSION = "v103"
 
 app = Flask(__name__, static_folder=WEB_DIR, static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = None  # 视频文件大，不限制
@@ -294,7 +298,12 @@ def _public_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     显式默认值兜底，以后加设置项不用再改两处。
     """
     cookie = cfg.get("cookie") or {}
-    out: Dict[str, Any] = {k: v for k, v in cfg.items() if k != "cookie"}
+    wa = cfg.get("web_auth") or {}
+    if not isinstance(wa, dict):
+        wa = {}
+    # web_auth 里的 token / 密码绝不能明文下发（即使页面本身已鉴权）。
+    out: Dict[str, Any] = {k: v for k, v in cfg.items()
+                           if k not in ("cookie", "web_auth")}
     out.update({
         "quota_limit": cfg.get("quota_limit") or 50,
         "quota_hours": cfg.get("quota_hours") or 24,
@@ -310,6 +319,15 @@ def _public_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "biliup_cookie_file": cfg.get("biliup_cookie_file") or "cookies.json",
         "upload_line": cfg.get("upload_line") or "bda2",
         "delete_after": cfg.get("delete_after") or "off",
+        # v103：状态通知与访问鉴权，统一给前端规整过的默认值
+        "notify": notify.normalize(cfg),
+        "web_auth": {
+            "enabled": bool(wa.get("enabled")),
+            "mode": str(wa.get("mode") or "token"),
+            "username": str(wa.get("username") or ""),
+            "token": _mask(str(wa.get("token") or "")),
+            "password": _mask(str(wa.get("password") or "")),
+        },
         "cookie": {
             "sessdata": _mask(cookie.get("sessdata", "")),
             "bili_jct": _mask(cookie.get("bili_jct", "")),
@@ -319,6 +337,120 @@ def _public_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         },
     })
     return out
+
+
+# ------------------------------------------------------- Web 访问鉴权
+# 文档鼓励 --host 0.0.0.0 局域网使用，但旧版所有路由零鉴权：任何人都能读
+# Cookie、投稿、改配置。这里加一个可开关的 before_request：
+#   * config.web_auth 未启用 / 没填凭据 → 完全不拦截，行为与旧版一致；
+#   * token 模式：query ?token= / X-Auth-Token / Bearer / Cookie 任一通过即可，
+#     首次通过后写 Cookie，后续静态资源与轮询请求自动带上；
+#   * basic 模式：标准 HTTP Basic，交给浏览器原生弹窗。
+WEB_AUTH_COOKIE = "wb_auth"
+AUTH_EXEMPT_PATHS = {"/api/health"}
+
+
+def _web_auth(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    raw = cfg.get("web_auth") or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    mode = str(raw.get("mode") or "token").strip().lower()
+    if mode not in ("token", "basic"):
+        mode = "token"
+    return {"enabled": bool(raw.get("enabled")), "mode": mode,
+            "token": str(raw.get("token") or ""),
+            "username": str(raw.get("username") or ""),
+            "password": str(raw.get("password") or "")}
+
+
+def _auth_login_page() -> Response:
+    """token 模式下的 401 页面：直接输 token，不必手工拼 URL。
+
+    保留原 query（例如平台的 sharecode），不然点「进入」会把分享码丢掉。
+    """
+    hidden = "".join(
+        '<input type="hidden" name="%s" value="%s">' % (
+            html.escape(str(k), quote=True), html.escape(str(v), quote=True))
+        for k, v in request.args.items() if k not in ("token", "access_token"))
+    body = """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>需要访问凭证 · B站投稿台</title>
+<style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:#f5f6f8;color:#2b303b;font:14px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
+.box{width:420px;max-width:90vw;box-sizing:border-box;background:#fff;
+border:1px solid #e3e5ea;border-radius:14px;padding:28px;
+box-shadow:0 12px 40px rgba(20,25,40,.08)}
+h1{font-size:18px;margin:0 0 8px}p{color:#5b6270;margin:0 0 18px}
+input{width:100%%;box-sizing:border-box;padding:10px 12px;border:1px solid #d8dce4;
+border-radius:8px;font-size:14px;margin-bottom:12px}
+button{width:100%%;padding:10px;border:0;border-radius:8px;background:#fb7299;color:#fff;
+font-size:14px;cursor:pointer}.hint{font-size:12px;color:#9098a6;margin:14px 0 0}
+</style></head><body><div class="box"><h1>需要访问凭证</h1>
+<p>本实例已开启 Web 访问鉴权，请输入设置里配置的访问 Token。</p>
+<form method="get" action="%s">%s
+<input name="token" type="text" autocomplete="off" placeholder="访问 Token" autofocus>
+<button type="submit">进入</button></form>
+<p class="hint">也可直接用 ?token=你的token 打开；首次通过后写入 Cookie，之后无需重复输入。</p>
+</div></body></html>""" % (html.escape(request.path, quote=True), hidden)
+    resp = Response(body, mimetype="text/html; charset=utf-8")
+    resp.status_code = 401
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.before_request
+def _require_web_auth():
+    if request.path in AUTH_EXEMPT_PATHS:
+        return None
+    wa = _web_auth(store.load_config())
+    if not wa["enabled"]:
+        return None                      # 未启用：零影响
+    if wa["mode"] == "basic":
+        if not (wa["username"] and wa["password"]):
+            return None                  # 凭据没配齐就不启用，避免把自己锁在外面
+        hdr = request.headers.get("Authorization", "")
+        if hdr.startswith("Basic "):
+            try:
+                raw = base64.b64decode(hdr[6:], validate=True).decode("utf-8")
+                user, _, pwd = raw.partition(":")
+                if (hmac.compare_digest(user, wa["username"])
+                        and hmac.compare_digest(pwd, wa["password"])):
+                    return None
+            except Exception:
+                pass
+        resp = jsonify({"ok": False, "error": "需要访问鉴权"})
+        resp.status_code = 401
+        resp.headers["WWW-Authenticate"] = 'Basic realm="bili-publisher", charset="UTF-8"'
+        return resp
+    if not wa["token"]:
+        return None                      # token 没填就不启用
+    supplied = (request.args.get("token") or request.args.get("access_token")
+                or request.headers.get("X-Auth-Token") or "")
+    hdr = request.headers.get("Authorization", "")
+    if hdr.startswith("Bearer "):
+        supplied = supplied or hdr[7:]
+    supplied = supplied or request.cookies.get(WEB_AUTH_COOKIE, "")
+    if supplied and hmac.compare_digest(str(supplied), wa["token"]):
+        g._auth_cookie_token = wa["token"]   # 由 after_request 落成 Cookie
+        return None
+    if (request.path == "/" or request.path.endswith(".html")
+            or "text/html" in request.headers.get("Accept", "")):
+        return _auth_login_page()
+    return jsonify({"ok": False, "error": "访问鉴权失败，请用 ?token=... 重新打开页面"}), 401
+
+
+@app.after_request
+def _persist_auth_cookie(resp):
+    tok = getattr(g, "_auth_cookie_token", "")
+    if tok:
+        try:
+            resp.set_cookie(WEB_AUTH_COOKIE, tok, max_age=30 * 86400,
+                            httponly=True, samesite="Lax", path="/")
+        except Exception:
+            pass
+    return resp
 
 
 class UploadRejected(ValueError):
@@ -520,9 +652,27 @@ def set_config():
               "biliup_bin", "biliup_line", "biliup_cookie_file",
               "upload_line", "delete_after",
               "quota_strict", "max_file_mb", "max_parts",
-              "overdue_guard", "overdue_minutes", "auto_resume"):
-        if k in body:
+              "overdue_guard", "overdue_minutes", "auto_resume", "notify"):
+        if k not in body:
+            continue
+        if k == "notify":
+            if isinstance(body[k], dict):
+                patch[k] = body[k]
+        else:
             patch[k] = body[k]
+    # web_auth 的 token / 密码下发时是掩码，保存时必须忽略掩码与空值，
+    # 否则只改一个别的设置就会把真凭据覆盖成 "***"，把自己锁在门外。
+    if "web_auth" in body and isinstance(body["web_auth"], dict):
+        inc = body["web_auth"]
+        cur = dict(store.load_config().get("web_auth") or {})
+        for k in ("enabled", "mode", "username"):
+            if k in inc:
+                cur[k] = inc[k]
+        for k in ("token", "password"):
+            v = str(inc.get(k) or "")
+            if v and "***" not in v:
+                cur[k] = v
+        patch["web_auth"] = cur
     if "defaults" in body and isinstance(body["defaults"], dict):
         patch["defaults"] = body["defaults"]
     if "cookie" in body and isinstance(body["cookie"], dict):
@@ -554,7 +704,40 @@ def set_config():
     if acc.get("logged_in"):
         store.patch_config({"account": {"mid": acc["mid"], "uname": acc["uname"], "face": acc["face"]}})
     worker.refresh_quota()
-    return jsonify({"ok": True, "account": acc})
+    resp = jsonify({"ok": True, "account": acc})
+    # 刚启用 / 更新 token 鉴权时，立刻给这次响应种 Cookie：否则前端保存后紧跟的
+    # /api/bootstrap 还没带 token，会 401，用户会以为「保存把页面弄坏了」。
+    wa = _web_auth(store.load_config())
+    if wa["enabled"] and wa["mode"] == "token" and wa["token"]:
+        try:
+            resp.set_cookie(WEB_AUTH_COOKIE, wa["token"], max_age=30 * 86400,
+                            httponly=True, samesite="Lax", path="/")
+        except Exception:
+            pass
+    return resp
+
+
+@app.post("/api/notify/test")
+def notify_test():
+    """发一条测试推送：允许先填地址直接测，不必先点「保存设置」。
+
+    用输入框里的临时值覆盖已保存配置，方便改完立刻验证机器人是否通；
+    同步执行（用户主动点击、有 6 秒超时），但失败只返回结果，不抛异常。
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    opt = notify.normalize(store.load_config())
+    for k in ("url", "kind", "chat_id"):
+        if body.get(k):
+            opt[k] = str(body[k])
+    if not opt["url"]:
+        return jsonify({"ok": False, "error": "请先填写 Webhook 地址"}), 400
+    opt["enabled"] = True
+    opt["events"] = {name: True for name in notify.EVENTS}
+    r = notify.dispatch({"notify": opt}, "task", "测试通知",
+                        "这是一条来自 B站投稿台 的测试推送，收到就说明配置正确。", "info")
+    return jsonify({"ok": True, "sent": bool(r.get("sent")),
+                    "kind": r.get("kind", ""),
+                    "detail": r.get("detail") or r.get("reason") or ""})
 
 
 @app.post("/api/cookie")

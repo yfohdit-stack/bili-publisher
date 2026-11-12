@@ -61,6 +61,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "no_reprint": False,
         "dynamic": "",
     },
+    # v103：状态通知（url 留空 = 完全不触发）与 Web 访问鉴权（默认关闭 = 零影响）。
+    # 显式写进默认配置，保证全新安装也能在设置里看到并可保存。
+    "notify": {"enabled": True, "url": "", "kind": "auto", "chat_id": "",
+               "timeout": 6, "events": {"task": True, "rate": True,
+                                        "quota": True, "resume": True}},
+    "web_auth": {"enabled": False, "mode": "token", "token": "",
+                 "username": "", "password": ""},
 }
 
 

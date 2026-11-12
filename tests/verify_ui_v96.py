@@ -90,10 +90,10 @@ with sync_playwright() as p:
     page.reload(wait_until="networkidle")
     page.wait_for_timeout(1500)
     chk("无冷却时提示条隐藏", not page.is_visible("#rateBanner"))
-    chk("版本号为 v102", "v102" in page.inner_text("#appVer"),
+    chk("版本号为 v103", "v103" in page.inner_text("#appVer"),
         page.inner_text("#appVer"))
-    chk("静态资源已升级到 v102",
-        'app.js?v=102' in page.content() and 'style.css?v=102' in page.content())
+    chk("静态资源已升级到 v103",
+        'app.js?v=103' in page.content() and 'style.css?v=103' in page.content())
 
     chk("无 JS 运行时错误", not errors, str(errors[:3]))
     b.close()

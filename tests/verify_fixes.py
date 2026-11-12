@@ -99,9 +99,9 @@ h = worker._history(now)
 check("_record_videos 按分P数记账", len(h) == 7, str(len(h)))
 check("窗口外记录被清掉", all(t > now - worker.WINDOW_SECS for t in h))
 
-# ---------------------------------------------------------------- 9. 定时（v42 已回退为固定提前量）
-print("\n[9] 定时发布：固定提前 10 分钟开传（已按用户要求回退）")
-check("B站定时余量回到 10 分钟", worker.SCHEDULE_MIN_AHEAD == 4 * 3600 + 600,
+# ---------------------------------------------------------------- 9. 定时（v103：B站定时最小提前量 10 分钟）
+print("\n[9] 定时发布：B站定时最小提前量 10 分钟（平台实际只要求 5 分钟）")
+check("B站定时最小提前量为 10 分钟", worker.SCHEDULE_MIN_AHEAD == 10 * 60,
       str(worker.SCHEDULE_MIN_AHEAD))
 
 # 本地到点自动上传（不交给B站定时）
@@ -112,12 +112,14 @@ local_past = {"publish_at": now - 5, "schedule_mode": "local"}
 bili_huge = {"publish_at": now + 20 * 86400, "schedule_mode": "bili"}
 bili_mid = {"publish_at": now + 5 * 3600, "schedule_mode": "bili"}
 bili_near = {"publish_at": now + 2 * 3600, "schedule_mode": "bili"}
+bili_soon = {"publish_at": now + 5 * 60, "schedule_mode": "bili"}
 check("本地定时 3 天后仍等待", worker._schedule_action(local_far) == "wait")
 check("本地定时不受 15 天限制", worker._schedule_action(local_huge) == "wait")
 check("本地定时到点即放行", worker._schedule_action(local_past) == "go")
 check("B站定时超 15 天判失败", worker._schedule_action(bili_huge) == "fail")
 check("B站定时 5 小时交B站", worker._schedule_action(bili_mid) == "go")
-check("B站定时 2 小时本地等", worker._schedule_action(bili_near) == "wait")
+check("B站定时 2 小时也交B站（提前量 > 10 分钟）", worker._schedule_action(bili_near) == "go")
+check("B站定时 5 分钟本地候到点", worker._schedule_action(bili_soon) == "wait")
 check("剩余时间格式化", "天" in worker._fmt_remain(3 * 86400 + 20)
       and "小时" in worker._fmt_remain(5400), worker._fmt_remain(5400))
 
