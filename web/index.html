@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>B站投稿台</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23fb7299'/%3E%3Cpath d='M9 10.5v11a1 1 0 0 0 1.5.86l9-5.5a1 1 0 0 0 0-1.72l-9-5.5A1 1 0 0 0 9 10.5z' fill='%23fff'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=103">
+<link rel="stylesheet" href="/static/style.css?v=105">
 </head>
 <body>
 
@@ -496,15 +496,7 @@
     </div>
 
     <div class="set-card">
-      <div class="section-title">上传通道</div>
-      <div class="field">
-        <label class="label" for="cfgChannel">默认通道</label>
-        <select class="select" id="cfgChannel">
-          <option value="auto">自动</option>
-          <option value="biliup">biliup CLI</option>
-          <option value="official">内置官方接口</option>
-        </select>
-      </div>
+      <div class="section-title">上传线路</div>
       <div class="field">
         <label class="label" for="cfgUploadLine">上传线路（CDN）</label>
         <select class="select" id="cfgUploadLine">
@@ -524,21 +516,6 @@
         </select>
       </div>
       <div class="kv"><span class="k">说明</span><span class="v">只选 CDN 厂商，落地 IP 由 CDN 调度</span></div>
-      <div class="field-row">
-        <div class="field">
-          <label class="label" for="cfgBiliupBin">biliup 路径</label>
-          <input class="input" id="cfgBiliupBin" placeholder="biliup">
-        </div>
-        <div class="field">
-          <label class="label" for="cfgBiliupLine">上传线路</label>
-          <input class="input" id="cfgBiliupLine" placeholder="留空自动测速">
-        </div>
-      </div>
-      <div class="field">
-        <label class="label" for="cfgBiliupCookie">biliup 登录文件</label>
-        <input class="input" id="cfgBiliupCookie" placeholder="cookies.json">
-      </div>
-      <div class="kv"><span class="k">biliup</span><span class="v" id="envBiliup">检测中</span></div>
       <div class="kv"><span class="k">官方接口</span><span class="v" id="envOfficial">检测中</span></div>
       <div class="kv"><span class="k">ffmpeg 抽帧</span><span class="v" id="envFfmpeg">检测中</span></div>
     </div>
@@ -620,6 +597,6 @@
 
 <div class="toast-wrap" id="toastWrap"></div>
 
-<script src="/static/app.js?v=103"></script>
+<script src="/static/app.js?v=105"></script>
 </body>
 </html>

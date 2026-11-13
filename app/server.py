@@ -23,14 +23,14 @@ from flask import g, send_file, Flask, Response, jsonify, request, send_from_dir
 
 from . import (editor, ledger, login, media, notify, partitions, quota, season,
                store, topic, worker)
-from .channels import biliup_cli, official
+from .channels import official
 
 BASE_DIR = store.BASE_DIR
 WEB_DIR = os.path.join(BASE_DIR, "web")
 UPLOAD_DIR = os.path.join(store.DATA_DIR, "uploads")
 COVER_DIR = os.path.join(store.DATA_DIR, "covers")
 
-APP_VERSION = "v103"
+APP_VERSION = "v105"
 
 app = Flask(__name__, static_folder=WEB_DIR, static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = None  # 视频文件大，不限制
@@ -302,8 +302,12 @@ def _public_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(wa, dict):
         wa = {}
     # web_auth 里的 token / 密码绝不能明文下发（即使页面本身已鉴权）。
+    # v105：历史 config.json 里可能还留着 biliup_* 键，一律不再下发；
+    # channel 也强制成 official，免得前端读到过期的 "biliup"。
     out: Dict[str, Any] = {k: v for k, v in cfg.items()
-                           if k not in ("cookie", "web_auth")}
+                           if k not in ("cookie", "web_auth")
+                           and not k.startswith("biliup_")}
+    out["channel"] = "official"
     out.update({
         "quota_limit": cfg.get("quota_limit") or 50,
         "quota_hours": cfg.get("quota_hours") or 24,
@@ -314,9 +318,6 @@ def _public_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "overdue_minutes": int(cfg.get("overdue_minutes") or 30),
         "max_file_mb": cfg.get("max_file_mb") or DEF_MAX_FILE_MB,
         "max_parts": cfg.get("max_parts") or DEF_MAX_PARTS,
-        "biliup_bin": cfg.get("biliup_bin") or "biliup",
-        "biliup_line": cfg.get("biliup_line") or "",
-        "biliup_cookie_file": cfg.get("biliup_cookie_file") or "cookies.json",
         "upload_line": cfg.get("upload_line") or "bda2",
         "delete_after": cfg.get("delete_after") or "off",
         # v103：状态通知与访问鉴权，统一给前端规整过的默认值
@@ -620,7 +621,6 @@ def bootstrap():
     acc = _account()
     env = {
         "ffmpeg": media.have_ffmpeg(),
-        "biliup": biliup_cli.probe(cfg.get("biliup_bin") or "biliup", cfg),
         "official": official.available(),
     }
     return jsonify({
@@ -649,7 +649,6 @@ def set_config():
     body = request.get_json(force=True, silent=True) or {}
     patch: Dict[str, Any] = {}
     for k in ("channel", "quota_limit", "quota_hours", "max_attempts",
-              "biliup_bin", "biliup_line", "biliup_cookie_file",
               "upload_line", "delete_after",
               "quota_strict", "max_file_mb", "max_parts",
               "overdue_guard", "overdue_minutes", "auto_resume", "notify"):

@@ -2,14 +2,14 @@
 
 一个跑在自己电脑上的 B站投稿面板。浏览器里拖视频、填标题分区、排进队列，软件按**单线程顺序**帮你投出去。
 
-> 当前版本：**v103**（见 `app/server.py` 中的 `APP_VERSION`）。
+> 当前版本：**v105**（见 `app/server.py` 中的 `APP_VERSION`）。
 > 仅用于个人本地投稿，凭据只存在本机，不上传任何地方。
 
 ## 功能
 
 - **队列投稿**：多文件排队，一个一个传，失败自动重试，进度和日志都看得见
 - **24 小时额度把关 + 封禁保护**：投稿前先数一遍这个账号最近 24 小时发了多少稿，超过上限会拦截并等待；命中 B站「n+1 封禁」时自动暂停到额度归零再续投（默认上限 50，可改）
-- **两条上传通道**：优先复用本机 `biliup`，没有就回退到内置的 B站官方接口
+- **单一上传通道**：内置 B站官方接口，自己实现预上传、分块、合并、提交，无需额外软件（v105 起移除 biliup CLI 通道）
 - **多分P**：多个视频合成一个稿件的 P1/P2…
 - **多账号**：可登记多个 B站账号，按任务指定投放账号，额度/节流/风控按账号隔离
 - **定时发布**：距现在 10 分钟以上交给 B站定时，不足则在本地等到点再投
@@ -57,16 +57,11 @@ python run.py
 
 > Cookie 只存在本机的 `data/config.json`（权限 0600），不会上传到任何地方。`SESSDATA` 等同于账号登录态，**别发截图、别提交到代码仓库**（仓库已通过 `.gitignore` 忽略 `data/`）。
 
-## 两条上传通道
+## 上传通道
 
-| 通道 | 前置条件 | 说明 |
-| --- | --- | --- |
-| biliup | 本机装了 `biliup`，并且已经 `biliup login` 过（存在 `cookies.json`） | 上传链路经过大量实战验证，大文件更稳 |
-| 内置官方接口 | 只要登录了网页 Cookie | 自己实现预上传、分块、合并、提交，无需额外软件 |
+只走**内置官方接口**：自己实现预上传、分块、合并、提交，只要登录了网页 Cookie 就能投，不需要额外装任何软件。
 
-默认 `自动`：biliup 有登录态就用 biliup，否则用官方接口。设置里可以固定其中一条。带话题 / 仅自己可见的稿件会强制走官方接口（biliup CLI 不支持）。
-
-> biliup 1.2.x 的登录态是它自己生成的 `cookies.json`（内含 app access_token），**不是网页 Cookie**，没法由 SESSDATA 伪造。所以要用这条通道，请先在终端执行一次 `biliup login`，再把登录文件路径填到设置里。
+> **v105 移除了 biliup CLI 通道。** 此前 biliup 用的是它自己的 `cookies.json`（内含 app `access_token`），可能和网页 Cookie 不是同一个 B站 号——稿件会静默投到别的账号，而额度、风控、统计全按本号算，完全不受监控。现在只剩一条路，这个风险从根上没了。升级后，历史 `config.json` 里残留的 `biliup_*` 键会被忽略，`channel` 强制为 `official`。
 
 ## 24 小时额度与封禁规则
 
@@ -150,7 +145,7 @@ bili-publisher/
 │   ├── worker.py         队列执行器：单线程顺序投稿、额度把关、节流、限流、恢复、_notify
 │   ├── quota.py          登录态 + 24h 投稿数统计 + 封禁状态机
 │   ├── store.py          配置 + SQLite（任务/日志/模板）+ 多账号体系 + notify/web_auth 默认
-│   ├── notify.py         新增：Webhook 底层（识别 / 组包 / POST / dispatch，纯标准库）
+│   ├── notify.py         Webhook 底层（识别 / 组包 / POST / dispatch，纯标准库）
 │   ├── ledger.py         本机投稿账本（补 24h 额度的「未确认」部分，去重计数）
 │   ├── media.py          ffprobe 探测、封面抽帧/归一化
 │   ├── partitions.py     分区列表（实时取 archive/pre 接口，含兜底白名单）
@@ -159,8 +154,7 @@ bili-publisher/
 │   ├── editor.py         稿件编辑/换封面/换视频/追加分P
 │   ├── season.py         合集列取 + 挂载 + 状态回读
 │   └── channels/
-│       ├── official.py   内置官方接口上传通道（预上传/分块/封面/提交）
-│       └── biliup_cli.py biliup CLI 上传通道（指向 cookies.json）
+│       └── official.py   内置官方接口上传通道（唯一；预上传/分块/封面/提交）
 ├── web/                  前端（单页 + 原生 JS）
 │   ├── index.html        页面骨架 + 封禁横幅/额度横幅 + 通知/鉴权设置卡片
 │   ├── app.js            前端逻辑（状态机/横幅分流/设置读写/测试通知/401 提示）
@@ -196,9 +190,6 @@ Token 模式用 `?token=你的token` 重新打开；Basic 模式在浏览器弹�
 **换封面失败 / 没有可用封面**
 封面靠 ffmpeg 抽帧，先确认 `ffmpeg`、`ffprobe` 在 PATH 里（`ffmpeg -version`）。
 
-**biliup 报 `credential validation failed`**
-登录文件过期，终端里重新 `biliup login`。
-
 **端口被占**
 `python run.py --port 5288`。
 
@@ -214,6 +205,6 @@ Token 模式用 `?token=你的token` 重新打开；Basic 模式在浏览器弹�
 
 ## 目录说明
 
-- `docs/CHANGELOG.md`：v98 → v103 的演进与关键设计（24h 封禁状态机、自动续投、Webhook、Web 鉴权等）
+- `docs/CHANGELOG.md`：v98 → v105 的演进与关键设计（24h 封禁状态机、自动续投、Webhook、Web 鉴权、单通道等）
 - `docs/V103-webhook-auth.md`：v103 设计与实现说明（Webhook 通知、Web 访问鉴权、定时阈值修正）
 - `tests/`：离线断言脚本，覆盖额度判定、节流、缓存、UI 状态机、Webhook、鉴权等，不访问 B站接口

@@ -11,10 +11,10 @@ import queue
 import re
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from . import ledger, media, notify, quota, season, store
-from .channels import biliup_cli, official
+from .channels import official
 
 # 定时发布：距发布时间 >= 这个间隔就把 dtime 直接交给B站定时队列。
 # B站定时实际只要求至少提前 5 分钟（旧版误以为要提前 4 小时），这里留一倍
@@ -62,6 +62,7 @@ NOTIFY_FAIL_LOG_GAP = 300.0
 _notify_last: Dict[str, float] = {}
 _notify_lock = threading.Lock()
 _notify_fail_logged_at = 0.0
+
 
 
 _thread: Optional[threading.Thread] = None
@@ -952,6 +953,15 @@ def _notify(event: str, title: str, text: str, level: str = "info") -> None:
         pass
 
 
+def _choose_channel(task: Dict[str, Any], cfg: Dict[str, Any],
+                    log: Callable[[str, str], None]) -> str:
+    """v105 起上传固定走内置官方接口：biliup 通道与实体校验已整体移除。
+
+    保留函数壳是为了兼容现有调用点与回归测试（测试仍断言返回 official）。
+    """
+    return "official"
+
+
 def _notify_send(cfg: Dict[str, Any], event: str, title: str,
                  text: str, level: str) -> None:
     """后台线程：真正发一次；失败只做节流式记日志，绝不抛到队列主循环。"""
@@ -1243,28 +1253,14 @@ def _handle(task: Dict[str, Any]) -> float:
             return 0.0
 
         # 5. 选通道
-        channel = (task.get("channel") or store.load_config().get("channel") or "auto").lower()
         # 多账号：任务绑定的账号优先，没绑定就用当前生效账号
         cfg = store.account_cfg(task.get("account_id"))
-        if channel == "auto":
-            binfo = biliup_cli.probe(cfg.get("biliup_bin") or "biliup", cfg, force=True)
-            channel = "biliup" if (binfo["available"] and binfo["logged_in"]) else "official"
-        if channel == "biliup" and not biliup_cli.probe(cfg.get("biliup_bin") or "biliup", cfg, force=True)["logged_in"]:
-            _log(tid, "biliup 未登录或不可用，回退到内置官方接口")
-            channel = "official"
-        if channel == "biliup" and int(task.get("topic_id") or 0):
-            # biliup CLI 没有 topic 参数，带话题的稿件只能走官方 add/v3
-            _log(tid, "biliup 通道不支持话题，改用内置官方接口")
-            channel = "official"
-        if channel == "biliup" and int(task.get("is_only_self") or 0):
-            # 仅自己可见是 add/v3 字段，biliup CLI 没有对应参数
-            _log(tid, "biliup 通道不支持「仅自己可见」，改用内置官方接口")
-            channel = "official"
+        channel = _choose_channel(task, cfg, lambda m, lv="info": _log(tid, m, lv))
 
         store.update_task(tid, status="uploading", attempts=int(task.get("attempts") or 0) + 1,
                           stage="准备上传", progress=0.01)
         _ensure_watchdog()
-        _log(tid, f"使用通道：{'biliup' if channel == 'biliup' else '官方接口'}")
+        _log(tid, "使用通道：官方接口")
 
         def log_fn(msg: str) -> None:
             _log(tid, msg)
@@ -1282,10 +1278,7 @@ def _handle(task: Dict[str, Any]) -> float:
                 and delta > SCHEDULE_MIN_AHEAD) else None
         )
 
-        if channel == "biliup":
-            result = biliup_cli.publish(send_task, cfg, log_fn, stage_fn)
-        else:
-            result = official.publish(send_task, cfg, log_fn, stage_fn)
+        result = official.publish(send_task, cfg, log_fn, stage_fn)
 
         bvid = (result or {}).get("bvid") or ""
         aid = (result or {}).get("aid")

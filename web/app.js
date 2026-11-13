@@ -1457,14 +1457,6 @@
   /* ---------------------------------------------------------- 设置 */
   function renderEnv() {
     const env = state.env || {};
-    const b = env.biliup || {};
-    if (!b.available) {
-      $("envBiliup").innerHTML = '<span class="pill no">未安装</span>';
-    } else if (!b.logged_in) {
-      $("envBiliup").innerHTML = '<span class="pill no">未登录</span> 需先运行 biliup login';
-    } else {
-      $("envBiliup").innerHTML = '<span class="pill ok">已登录</span> ' + esc(b.version || "");
-    }
     $("envOfficial").innerHTML = env.official ? '<span class="pill ok">可用</span>' : '<span class="pill no">缺少依赖</span>';
     $("envFfmpeg").innerHTML = env.ffmpeg ? '<span class="pill ok">可用</span>' : '<span class="pill no">未安装</span>';
   }
@@ -1491,11 +1483,7 @@
     if ($("maxFileMb")) $("maxFileMb").value = c.max_file_mb || 8192;
     if ($("maxParts")) $("maxParts").value = c.max_parts || 20;
     if ($("deleteAfter")) $("deleteAfter").value = c.delete_after || "off";
-    $("cfgChannel").value = c.channel || "auto";
     if ($("cfgUploadLine")) $("cfgUploadLine").value = c.upload_line || "bda2";
-    $("cfgBiliupBin").value = c.biliup_bin || "biliup";
-    $("cfgBiliupLine").value = c.biliup_line || "";
-    $("cfgBiliupCookie").value = c.biliup_cookie_file || "cookies.json";
     $("quotaWindow").textContent = "近 " + (c.quota_hours || 24) + " 小时";
     // v103：状态通知（Webhook）
     const nt = c.notify || {};
@@ -1743,11 +1731,7 @@
           max_attempts: Number($("maxAttempts").value) || 0,
           max_file_mb: Number($("maxFileMb") ? $("maxFileMb").value : 0) || 8192,
           max_parts: Number($("maxParts") ? $("maxParts").value : 0) || 20,
-          channel: $("cfgChannel").value,
           upload_line: $("cfgUploadLine") ? $("cfgUploadLine").value : "bda2",
-          biliup_bin: $("cfgBiliupBin").value.trim() || "biliup",
-          biliup_line: $("cfgBiliupLine").value.trim(),
-          biliup_cookie_file: $("cfgBiliupCookie").value.trim() || "cookies.json",
           notify: {
             enabled: $("notifyEnabled") ? !!$("notifyEnabled").checked : true,
             url: $("notifyUrl") ? $("notifyUrl").value.trim() : "",

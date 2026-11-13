@@ -185,7 +185,6 @@ def run_handle(q, publish=None):
     worker._rate_state.clear(); worker._rate_until.clear(); worker._rate_wait.clear()
     task = new_task(attempts=1)
     with mock.patch.object(worker, "fresh_quota", return_value=q), \
-         mock.patch.object(worker.biliup_cli, "probe", return_value={"available": False, "logged_in": False}), \
          mock.patch.object(worker.official, "publish",
                            side_effect=publish if publish else None,
                            return_value={"bvid": "BVNEW", "aid": 9999}):

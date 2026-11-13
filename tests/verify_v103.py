@@ -241,7 +241,9 @@ readme = open(os.path.join(ROOT, "README.md"), encoding="utf-8").read()
 check("已删除上回加回的说明", "达到上限 +1 会触发 B站 24h 投稿封禁" not in html)
 check("过期文案已改本地定时", "本地定时稿件过期超过" in html)
 check("旧过期文案已不存在", ">定时稿件过期超过" not in html)
-check("前端版本号 v103", "app.js?v=103" in html and "style.css?v=103" in html)
+check("前端静态资源版本号与服务端一致",
+      ("app.js?v=" + server.APP_VERSION[1:]) in html
+      and ("style.css?v=" + server.APP_VERSION[1:]) in html)
 check("worker 过期日志同步", "本地定时稿件已过期超过" in wsrc)
 check("SCHEDULE_MIN_AHEAD = 600", "SCHEDULE_MIN_AHEAD = 10 * 60" in wsrc)
 check("旧 4h30m 常量已移除", "4 * 3600 + 600" not in wsrc)

@@ -39,11 +39,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "accounts": [],
     "active_account": "",
     "legacy_account_backfill": False,
-    # auto = 有 biliup 就走 biliup，失败或不存在时回退内置官方接口
-    "channel": "auto",
-    "biliup_bin": "biliup",
-    "biliup_line": "",
-    "biliup_cookie_file": "cookies.json",
+    # v105：移除 biliup 通道，上传固定走内置官方接口
+    "channel": "official",
     # 24 小时投稿数上限，超过即拦截
     "quota_limit": 50,
     "quota_hours": 24,
