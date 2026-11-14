@@ -30,7 +30,7 @@ WEB_DIR = os.path.join(BASE_DIR, "web")
 UPLOAD_DIR = os.path.join(store.DATA_DIR, "uploads")
 COVER_DIR = os.path.join(store.DATA_DIR, "covers")
 
-APP_VERSION = "v105"
+APP_VERSION = "v106"
 
 app = Flask(__name__, static_folder=WEB_DIR, static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = None  # 视频文件大，不限制
@@ -1188,10 +1188,13 @@ def tasks():
     cfg = store.load_config()
     ban = float(cfg.get("quota_ban_until") or 0.0)
     ar = cfg.get("auto_resume", True) is not False
-    fp = "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" % (store.tasks_fingerprint(),
+    fp = "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" % (store.tasks_fingerprint(),
                           "P" if worker.is_paused() else "-",
                           worker.current_task_id(), q.get("checked_at", ""),
-                          int(ru), int(rw), pr, int(ra), int(ban), "A" if ar else "-")
+                          int(ru), int(rw), pr, int(ra), int(ban), "A" if ar else "-",
+                          # 额度数字也算指纹：只有账本变了（新占位 / 新确认）而任务状态没变时，
+                          # 也要重建响应，否则界面上的「已投 N/上限」会停在旧数字
+                          q.get("count", ""), q.get("pending", ""))
     return _cached_json("tasks", fp, lambda: {
         "tasks": [_public_task(t) for t in store.list_tasks()],
         "queue": {"paused": worker.is_paused(), "current": worker.current_task_id(),
@@ -1235,6 +1238,13 @@ def task_action(task_id: str):
         worker.request_cancel(task_id)
         worker.clear_cancel(task_id)
         store.delete_task(task_id)
+        # 额度占位收尾：任务都删了，还没落地的 inflight 占位一起撤掉，
+        # 否则它会白占 24h 额度（已确认/结果未知的记录保留，那是真投出去的稿）
+        try:
+            ledger.release(str((task or {}).get("account_id") or store.active_account_id() or ""),
+                           task_id)
+        except Exception:   # noqa: BLE001  账本异常不阻断删除
+            pass
         d = os.path.join(UPLOAD_DIR, task_id)
         if os.path.isdir(d):
             for f in os.listdir(d):
@@ -1291,6 +1301,11 @@ def clear_done_tasks():
         removed += 1
     if removed:
         _json_cache.pop("tasks", None)
+        # 任务被清掉后，账本里对应的「未落地占位」也要跟着清，免得白占额度
+        try:
+            ledger.reconcile([t["id"] for t in store.list_tasks()])
+        except Exception:   # noqa: BLE001  账本异常不阻断清理
+            pass
         store.add_log(None, f"批量清理已结束任务 {removed} 个")
         worker.wake()
     return jsonify({"ok": True, "removed": removed})

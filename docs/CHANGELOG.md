@@ -1,8 +1,47 @@
-# 演进与关键设计（v98 → v105）
+# 演进与关键设计（v98 → v106）
 
-> 本文档记录本项目的核心演进与关键设计，便于接手维护。代码版本以 `app/server.py` 中的 `APP_VERSION` 为准（当前 **v105**）。
+> 本文档记录本项目的核心演进与关键设计，便于接手维护。代码版本以 `app/server.py` 中的 `APP_VERSION` 为准（当前 **v106**）。
 
-## 〇、v105 要点（2026-11-13）：移除 biliup，固定单通道
+## 〇、v106 要点（2026-11-14）：额度即时占位 + 入队即刻刷新
+
+**问题一：投稿完成后额度刷新有延迟，下一个稿件可能越界。**
+根因是额度只在「投稿成功之后」记账：一次投稿从开始上传到拿到结果要几分钟，
+这段时间B站创作者中心（`member.bilibili.com/x/web/archives`）里根本查不到这篇稿，
+额度判定却发生在「下一篇开始之前」，于是按旧数字一路放行，直到越界。
+
+- 账本改成分状态记账（`ledger.py`）：**上传一开始就写 `inflight` 占位**，成功后
+  `confirm` 成 `confirmed`（带上 BV/aid），`release` 撤回确定没投出去的失败，
+  `mark_uncertain` 保留「已进入提交阶段后失败」的占位（见下）。
+- `worker.py` 在 `official.publish()` 之前 `ledger.reserve()`，成功 `confirm()`；
+  异常时按本轮到达过的最深进度分流：`SUBMIT_PROGRESS_MARK = 0.9`（官方通道
+  提交阶段为 0.92）之前失败 → 撤回占位；之后失败（提交响应超时、进程中断）→
+  保留 `uncertain`，因为稿件可能已经发出去了。
+- `_mark_interrupted()` / `shutdown()` 用任务落库的进度做同样判断，进程重启也不会
+  凭一份「还没有这篇稿」的旧列表放行。
+- `start()` 与「清空已结束任务」「删除任务」都会 `ledger.reconcile()` / `release()`，
+  孤儿占位不会白占 24h 额度。
+- 修正账号桶归一：`quota.check_quota()` 过去把 `account_key=""` 原样透传，读的是空桶，
+  而 `worker` 写账本写的是「生效账号」桶——未确认永远算成 0。现在空串一律归一到
+  `active_account_id()`。
+- `/api/tasks` 的响应指纹加入 `count/pending`：账本变了而任务状态没变时也会重建响应，
+  界面上的额度数字不会停在旧值；额度提示会注明「其中 X 篇上传中/结果未知」。
+- 额度缓存键三种写法（账号 id / 生效账号 / `_active`）全部清掉，避免 180 秒旧数字。
+
+**问题二：加入任务后队列不会立刻刷新显示任务。**
+`pollTasks()` 开头有「上传文件时不抢带宽」的短路 `if (state.uploading) return;`，
+而提交完成后的那次 `await pollTasks()` 又发生在 `finally` 把 `state.uploading = false`
+之前——于是本次刷新被自己短路掉，用户要等下一轮自然轮询（退避后最长 20 秒）才看到任务。
+
+- `pollTasks(force)` 增加 force 参数，上传期间的强制刷新可以穿透守卫。
+- 新增 `prependTasks()`：`/api/publish` 返回的任务**本地立刻插到队列顶部并重绘**
+  （多文件逐个入队，每传完一个就显示一个），不等服务端轮询。
+- `finally` 里先 `state.uploading = false`，再 `await pollTasks(true)`。
+- 队列里有 `uploading / queued / waiting_schedule` 任务时不再退到 10/20 秒轮询
+  （最多 5 秒），投稿完成那一刻也能马上看到。
+- 新增 `tests/verify_v106.py`（28 项）：账本状态机、模拟B站入库延迟下的越界验证、
+  账号桶归一、缓存即时 +1、worker 三种收尾、前端守卫与版本号同步。
+
+## 〇.一、v105 要点（2026-11-13）：移除 biliup，固定单通道
 
 **动机（安全性修复）**：biliup CLI 使用其自带的 `cookies.json`（内含 app `access_token`），与网页 Cookie 可能不是同一个 B站 账号。若两者不一致，稿件会静默投到**另一个账号**，而额度、风控、统计仍按本号计算，完全不受监控——风险不可接受。
 
@@ -14,7 +53,7 @@
 - 新增 `tests/verify_ui_v105.py`：校验前端资源无 biliup 字样、bootstrap 只下发 official、设置面板控件已移除、保存无 JS 报错。
 - **升级兼容**：历史 `config.json` 里残留的 `biliup_*` 键被忽略，不会被下发或误用，无需手工清理。
 
-## 〇.一、v103 要点（2026-11-12）
+## 〇.二、v103 要点（2026-11-12）
 
 - **状态通知（Webhook）**：新增 `app/notify.py`，在队列执行器四处插入 `_notify()`（稿件终态 / 额度封禁暂停 / 封禁解除续投 / 限流卡住）。不填地址完全不触发；独立守护线程 + 6s 超时，失败绝不阻塞队列；支持企业微信/钉钉/飞书/Server酱/Telegram/通用 JSON。详见 `docs/V103-webhook-auth.md`。
 - **Web 访问鉴权**：新增 `@before_request` 中间件 + `config.web_auth`，支持 Token / Basic Auth，默认关闭、凭据不全不拦截，仅 `/api/health` 豁免。

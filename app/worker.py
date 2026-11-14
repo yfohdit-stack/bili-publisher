@@ -55,6 +55,11 @@ _NUM = re.compile(r"\d+(?:\.\d+)?")
 STUCK_TIMEOUT = 30 * 60
 WATCHDOG_INTERVAL = 60
 
+# 「已进入提交阶段」的进度阈值：官方通道 PRE_SUBMIT 为 0.92、AFTER_SUBMIT 为 0.98。
+# 越过这条线之后再失败，就不能断定稿件没投出去——账本里的占位记录要保留，
+# 否则下一轮会按B站那份「还没有这篇稿」的列表算额度，一路放行到越界。
+SUBMIT_PROGRESS_MARK = 0.9
+
 # 状态通知：同一事件文案在短时间内重复出现只推一次（限流/额度复查可能连击），
 # 失败日志也做节流，避免 Webhook 挂掉时把总日志刷满。
 NOTIFY_DEDUP_SECS = 20.0
@@ -117,6 +122,14 @@ def start() -> None:
                             if _pause_reason == "quota" else 0.0)
         _quota_last_check = 0.0
         recover_interrupted()
+        # 收拾孤儿占位：任务已被删除/清空，账本里对应的 inflight 行要一起撤掉，
+        # 否则它们会白占 24h 额度、把队列卡在上限里。
+        try:
+            removed = ledger.reconcile([t["id"] for t in store.list_tasks(limit=5000)])
+            if removed:
+                store.add_global_log(f"启动检查：清理 {removed} 条失效的额度占位记录", "info")
+        except Exception:   # noqa: BLE001  账本异常不阻断启动
+            pass
         _reset_stage()
         _stop.clear()
         _wake.clear()
@@ -165,6 +178,16 @@ def recover_interrupted() -> int:
 def _mark_interrupted(reason: str) -> int:
     n = 0
     for t in store.list_by_status("uploading"):
+        # 额度占位收尾：进度已过提交阶段 → 稿件可能已经发出，占位保留（uncertain）；
+        # 还在传分块 → 确定没提交出去，撤掉占位，别白占 24 小时额度、把队列卡住。
+        try:
+            acct = str(t.get("account_id") or store.active_account_id() or "")
+            if float(t.get("progress") or 0) >= SUBMIT_PROGRESS_MARK:
+                ledger.mark_uncertain(acct, t["id"])
+            else:
+                ledger.release(acct, t["id"])
+        except Exception:   # noqa: BLE001  账本异常不影响中断标记
+            pass
         store.update_task(
             t["id"], status="interrupted", finished_at=time.time(),
             stage="", speed=0, error="interrupted",
@@ -330,6 +353,8 @@ def _quota_with_ledger(data: Dict[str, Any],
     count = merged["count"]
     out = dict(data)
     out["local_count"] = len(rows)
+    out["inflight"] = sum(1 for r in rows
+                          if r.get("state") in ("inflight", "uncertain"))
     out["confirmed"] = remote_n
     out["pending"] = pending
     out["intersect"] = merged["intersect"]
@@ -352,7 +377,10 @@ def _quota_with_ledger(data: Dict[str, Any],
     else:
         out["ok"] = count < limit
         if not out["ok"]:
-            extra = f"（已确认 {remote_n} + 未确认 {pending}）" if pending > 0 else ""
+            extra = (f"（已确认 {remote_n} + 未确认 {pending}"
+                     + (f"，其中 {out.get('inflight') or 0} 篇上传中/结果未知"
+                        if out.get("inflight") else "")
+                     + "）" if pending > 0 else "")
             out["error"] = (f"近 {hours} 小时已投稿 {count} 个（含审核中与未通过{extra}），"
                             f"达到上限 {limit}")
         elif out.get("error") and not out.get("incomplete"):
@@ -1155,6 +1183,12 @@ def _handle(task: Dict[str, Any]) -> float:
         _current["started_at"] = time.time()
     _reset_stage(tid)
 
+    # 额度占位与「本轮走到过哪一步」的标记：异常收尾时要判断该不该撤掉占位。
+    # acct_key 必须和额度查询侧用同一只账本桶（任务没绑账号时回落到当前生效账号）。
+    acct_key = str(task.get("account_id") or store.active_account_id() or "")
+    submitted = {"max": 0.0}
+    reserved = {"on": False}
+
     try:
         # 2. 10 分钟窗口节流：只针对本任务所属账号，窗口腾不下就把该账号
         #    登记为「暂时跳过」，返回 0 让主循环立刻去取别的账号的任务。
@@ -1257,6 +1291,16 @@ def _handle(task: Dict[str, Any]) -> float:
         cfg = store.account_cfg(task.get("account_id"))
         channel = _choose_channel(task, cfg, lambda m, lv="info": _log(tid, m, lv))
 
+        # 5.1 先占额度：从这一刻起这篇稿就算进 24h 额度，不等上传结束、更不等B站入库。
+        #     B站创作者中心对刚提交的稿件有 1~3 分钟入库延迟，配额把关却发生在
+        #     「下一篇开始之前」——只记成功后的账，中间这段窗口就会按旧数字放行。
+        try:
+            ledger.reserve(acct_key, tid)
+            reserved["on"] = True
+        except Exception as e:   # noqa: BLE001  占位失败不能阻断投稿，但必须留痕
+            _log(tid, f"额度占位写入失败（不影响投稿，但额度可能少算一篇）："
+                      f"{type(e).__name__}: {e}", "warn")
+
         store.update_task(tid, status="uploading", attempts=int(task.get("attempts") or 0) + 1,
                           stage="准备上传", progress=0.01)
         _ensure_watchdog()
@@ -1268,6 +1312,7 @@ def _handle(task: Dict[str, Any]) -> float:
         def stage_fn(text: str, progress: float, speed: Optional[float] = None) -> None:
             if _cancelled(tid):
                 raise RuntimeError("用户已取消")
+            submitted["max"] = max(submitted["max"], float(progress or 0))
             _stage(tid, text, progress, speed)
 
         # 只有「离发布还很久」且选了 B站定时的稿子才把发布时间交给B站
@@ -1282,15 +1327,16 @@ def _handle(task: Dict[str, Any]) -> float:
 
         bvid = (result or {}).get("bvid") or ""
         aid = (result or {}).get("aid")
-        # 立刻记进 24h 账本：B站列表要 1~3 分钟才显示这稿，额度判定不能等它。
-        # 这一条是「未确认」的唯一来源，写完下一个任务就能看到 +1。
+        # 把占位行补成「已确认」并带上 BV/aid：B站列表入库后按身份键对账去重，
+        # 既不会漏算这一篇，也不会因为两边都出现而重复计数。
         try:
-            # 账号键必须与额度查询侧一致：任务没绑账号时回落到当前生效账号，
-            # 否则记录会落进空串桶，查询读的是 active 账号桶，未确认永远是 0。
-            ledger.record(_acct(task) or store.active_account_id() or "",
-                          task_id=tid, bvid=bvid, aid=aid)
+            ledger.confirm(acct_key, tid, bvid=bvid, aid=aid)
+            reserved["on"] = False
         except Exception as e:   # noqa: BLE001  账本写失败不能影响投稿结果
-            _log(tid, f"投稿账本写入失败（不影响投稿）：{type(e).__name__}: {e}", "warn")
+            # 写失败时占位行仍留在账本里（照样计入额度），只是少了身份键；
+            # 下一篇不会因此少算，最多在B站列表入库前多算一篇，属于保守方向。
+            _log(tid, f"投稿账本写入失败（占位仍计入额度，不影响投稿）："
+                      f"{type(e).__name__}: {e}", "warn")
         msg = "投稿成功" + (f"，BV 号 {bvid}" if bvid else "（BV 号未取到，请到创作中心确认）")
         if send_task.get("submit_dtime"):
             msg += "，已交给B站定时发布"
@@ -1346,6 +1392,20 @@ def _handle(task: Dict[str, Any]) -> float:
         attempts = int(task.get("attempts") or 0) + 1
         max_attempts = int(task.get("max_attempts") or 2)
         err = f"{type(e).__name__}: {e}"
+        # 额度占位收尾：只有「确定没走到提交阶段」才撤占位（406/429、验证码、
+        # 预上传失败、用户取消都属于这一类）；已经进入提交阶段后失败，稿件可能
+        # 已经发出去了，占位必须保留（uncertain），否则下一轮就会按旧列表放行。
+        if reserved["on"]:
+            try:
+                if submitted["max"] >= SUBMIT_PROGRESS_MARK:
+                    ledger.mark_uncertain(acct_key, tid)
+                    _log(tid, "本轮已进入提交阶段后失败，额度按「可能已投出」保留占位，"
+                              "请到创作中心核对是否已有该稿", "warn")
+                else:
+                    ledger.release(acct_key, tid)
+                    reserved["on"] = False
+            except Exception:   # noqa: BLE001  账本异常不影响失败处理
+                pass
         # 限流（封面 -702 / 预上传 406、429）与验证码风控是两类问题：前者是平台
         # 窗口，等 1 或 5 分钟就能再探（406 的 10 分钟窗口内 5min/10min 各探一次），
         # 不该消耗稿件的失败重试次数；后者才按账号冷却。限流判断放在风控前面，
@@ -1387,8 +1447,12 @@ def _handle(task: Dict[str, Any]) -> float:
         with _state_lock:
             _current["task_id"] = ""
             _current["started_at"] = 0.0
-        _quota_cache.pop(task.get("account_id") or store.active_account_id(), None)
-        _quota_cache.pop(store.active_account_id(), None)
+        # 清掉本账号的额度缓存：下一轮必须现查（账本已含本次占位/确认），
+        # 缓存键有三种写法（账号 id / 生效账号 / "_active"），全部清掉，
+        # 否则没有登记账号时 "_active" 那份旧数字会一直用到 180 秒后。
+        for k in (str(task.get("account_id") or ""),
+                  str(store.active_account_id() or ""), "_active"):
+            _quota_cache.pop(k, None)
         _reset_stage()
         _stop.wait(1.0)   # 用 Event.wait：收到停止信号能立刻退出，不用干等
     return 0.0

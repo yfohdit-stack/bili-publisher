@@ -351,7 +351,8 @@ def check_quota(cfg: Dict[str, Any], account_key: Optional[str] = None) -> Dict[
     """返回 {ok, count, limit, mid, error, checked_at, items, incomplete}。
 
     额度 = 已确认（B站创作者中心能统计到的）+ 未确认（本机已投出、B站还没显示的）。
-    后者来自 data/submit_ledger.json，由 worker 在每次投稿成功后立刻写入，没有延迟。
+    后者来自 data/submit_ledger.json：v106 起在「开始上传」时就写一条占位记录，
+    B站入库延迟、甚至提交请求超时，都不会让额度少算一篇。
 
     incomplete=True 表示这次统计没抓全（某个状态列表拉取失败，或只能退回
     「仅已发布」口径）。默认 quota_strict=True：数据不全时按保守策略拦下，
@@ -367,7 +368,7 @@ def check_quota(cfg: Dict[str, Any], account_key: Optional[str] = None) -> Dict[
         "incomplete": False, "strict": strict,
         # 两个口径分开给界面：已确认=B站已统计到，未确认=本机已投但B站还没显示
         "confirmed": 0, "pending": 0, "remote_count": 0, "local_count": 0,
-        "intersect": 0, "merge_fallback": False, "remote_keys": [],
+        "intersect": 0, "merge_fallback": False, "remote_keys": [], "inflight": 0,
         "next_release_at": 0.0, "quota_ban_until": 0.0,
     }
     if not account["logged_in"]:
@@ -403,12 +404,17 @@ def check_quota(cfg: Dict[str, Any], account_key: Optional[str] = None) -> Dict[
         try:
             from . import ledger
             from . import store as _store
-            key = account_key if account_key is not None else _store.active_account_id() or ""
+            # 账号键必须落到同一只桶：记录的调用点用「任务账号 or 生效账号」，
+            # 这里如果让空串原样透传，未确认会永远读成 0（投出去的稿全都不算额度）。
+            key = account_key or _store.active_account_id() or ""
             rows = ledger.recent(key, hours)
             merged = split_quota(items, rows)
         except Exception:   # noqa: BLE001  账本读失败就退回纯远端口径，不阻断投稿
             pass
         result["local_count"] = len(rows)
+        # 其中还没落地（上传中 / 结果未知）的条数，界面用它说明「未确认」的构成
+        result["inflight"] = sum(1 for r in rows
+                                 if r.get("state") in ("inflight", "uncertain"))
         result["confirmed"] = merged["confirmed"]
         result["pending"] = merged["pending"]
         result["intersect"] = merged["intersect"]
@@ -433,8 +439,10 @@ def check_quota(cfg: Dict[str, Any], account_key: Optional[str] = None) -> Dict[
             if not result["ok"]:
                 # 只是刚好满 n（没到 n+1），等最早一篇滑出腾出空位即可
                 result["next_release_at"] = next_release_at(items, hours, merged["count"], limit)
-                extra = (f"（已确认 {merged['confirmed']} + 未确认 {merged['pending']}）"
-                         if merged["pending"] > 0 else "")
+                extra = (f"（已确认 {merged['confirmed']} + 未确认 {merged['pending']}"
+                         + (f"，其中 {result.get('inflight') or 0} 篇上传中/结果未知"
+                            if result.get("inflight") else "")
+                         + "）" if merged["pending"] > 0 else "")
                 result["error"] = (f"近 {hours} 小时已投稿 {merged['count']} 个"
                                    f"（含审核中与未通过{extra}），达到上限 {limit}")
         if got["warnings"]:

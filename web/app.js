@@ -391,7 +391,12 @@
 
   function schedulePolling() {
     if (state.pollTimer) clearTimeout(state.pollTimer);
-    const gap = document.hidden ? POLL_SLOW : POLL_STEPS[pollStep];
+    // 队列里有任务在跑/在排队时不做长退避：投稿完成、新稿入队都要能立刻看到。
+    // 只有真的空闲（没有 uploading/queued/waiting_schedule）才退到 10/20 秒。
+    const active = (state.tasks || []).some((t) =>
+      t.status === "uploading" || t.status === "queued" || t.status === "waiting_schedule");
+    const step = active ? Math.min(pollStep, 1) : pollStep;
+    const gap = document.hidden ? POLL_SLOW : POLL_STEPS[step];
     state.pollTimer = setTimeout(pollTick, gap);
   }
 
@@ -469,8 +474,11 @@
     }, 5 * 60 * 1000);
   }
 
-  async function pollTasks() {
-    if (state.uploading) return;          // 上传文件时不抢带宽
+  // force=true 时即使还在上传文件也要拉一次：上传期间队列照样要能显示新任务，
+  // 旧实现里这个「不抢带宽」的短路让加入队列后的刷新全部静默失效，
+  // 用户要等到下一次自然轮询（退避后最长 20 秒）才看见任务。
+  async function pollTasks(force) {
+    if (state.uploading && !force) return;   // 上传文件时不主动抢带宽（强制刷新除外）
     try {
       const r = await api("/api/tasks");
       state.tasks = r.tasks || [];
@@ -496,6 +504,20 @@
       // 只在队列真的变了时刷新展开日志，避免每轮对每个展开任务各发一次请求
       if (changed && state.expanded && Object.keys(state.expanded).length) loadAllExpandedLogs();
     } catch (e) { /* 忽略轮询错误 */ }
+  }
+
+  // 把 /api/publish 刚返回的任务立刻插到队列顶部并重绘：
+  // 本地就能完成，不必等下一轮 /api/tasks，也不会被上传占用带宽影响。
+  function prependTasks(list) {
+    if (!list || !list.length) return;
+    const ids = new Set(list.map((t) => t.id));
+    const rest = (state.tasks || []).filter((t) => !ids.has(t.id));
+    state.tasks = list.concat(rest);
+    const cs = {};
+    state.tasks.forEach((t) => { cs[t.status] = (cs[t.status] || 0) + 1; });
+    state.counts = cs;
+    state.sig = "";            // 作废重绘签名，保证立刻重建列表
+    renderTasks();
   }
 
   /* ---------------------------------------------------------- 顶栏 */
@@ -553,7 +575,11 @@
     const conf = (typeof q.confirmed === "number")
       ? "计数：已确认 " + q.confirmed
         + " + 未确认 " + (q.pending || 0) + " = " + q.count + "。"
-        + ((q.pending || 0) > 0 ? "（未确认的是刚投出去、B站还没显示的）" : "")
+        + ((q.pending || 0) > 0
+          ? "（未确认的是刚投出去、B站还没显示的"
+            + ((q.inflight || 0) > 0 ? "，其中 " + q.inflight + " 篇上传中/结果未知" : "")
+            + "）"
+          : "")
       : "";
     const banUntil = Number(q.quota_ban_until || state.quotaBanUntil || 0);
     chip.title = (parts ? "近 24 小时投稿：" + parts + "。" : "") + conf
@@ -1908,6 +1934,7 @@
         if (res.r && res.r.quota) { state.quota = res.r.quota; renderQuota(); }
         quotaFull = quotaFull || !!(res.r && res.r.quota_full);
         queued = (res.r.tasks || []).length;
+        prependTasks(res.r && res.r.tasks);   // 立刻出现在队列里
       } else {
         for (let i = 0; i < total; i++) {
           const f = files[i];
@@ -1929,9 +1956,10 @@
           if (res.r && res.r.quota) { state.quota = res.r.quota; renderQuota(); }
           quotaFull = quotaFull || !!(res.r && res.r.quota_full);
           queued += (res.r.tasks || []).length;
+          prependTasks(res.r && res.r.tasks);   // 每传完一个就立刻显示，不用等整批结束
           fill.style.width = Math.round(((i + 1) / total) * 100) + "%";
           txt.textContent = "第 " + (i + 1) + "/" + total + " 个已入队 · 共 " + queued + " 个任务";
-          await pollTasks();
+          pollTasks(true);             // 强制刷新一次（不 await，别拖慢后面的上传）
         }
       }
 
@@ -1956,16 +1984,18 @@
       if (document.body.dataset.view === "archive") loadOverviewStats("archive", true);
       setTimeout(() => { bar.classList.remove("show"); fill.style.width = "0"; }, 1400);
       resetCompose();
-      await pollTasks();
     } catch (e) {
       bar.classList.remove("show");
       toast("提交失败：" + e.message, "err", 4600);
       if (queued) toast("已成功入队 " + queued + " 个，其余未提交", "ok", 4600);
     } finally {
+      // 先把上传标记放掉，再强制刷新队列：旧实现在 uploading=false 之前就调
+      // pollTasks()，被同一个守卫短路掉，入队后队列要等下一轮轮询才更新。
       state.uploading = false;
       renderLoginState();
       fill.style.width = "0";
       resetPollBackoff();
+      await pollTasks(true);
     }
 
     if ($("publishAt").value) {
