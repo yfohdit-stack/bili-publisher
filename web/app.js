@@ -42,8 +42,9 @@
     archives: [],
     archSig: "",
     paused: false,
-    pauseReason: "",       // "" | manual | quota | rate：额度满时队列是「等待」而非「停工」
+    pauseReason: "",       // "" | manual | quota | rate | cover：额度满/封面拒收时是「等待」而非「停工」
     quotaResumeAt: 0,      // 额度预计腾出空位/解封的时刻，用于倒计时
+    coverResumeAt: 0,      // 封面被拒收后自动重试的时刻，用于倒计时
     quotaBanUntil: 0,      // 24h 投稿封禁截止（额度归零）时刻
     quotaToast: false,
     uploading: false,
@@ -209,6 +210,7 @@
     state.paused = !!(r.queue && r.queue.paused);
     state.pauseReason = (r.queue && r.queue.pause_reason) || "";
     state.quotaResumeAt = Number((r.queue && r.queue.quota_resume_at) || 0);
+    state.coverResumeAt = Number((r.queue && r.queue.cover_resume_at) || 0);
     state.quotaBanUntil = Number((r.queue && r.queue.quota_ban_until) || 0);
     state.rateUntil = (r.queue && r.queue.rate_until) || 0;
     state.rateWait = (r.queue && r.queue.rate_wait) || 0;
@@ -435,6 +437,20 @@
       $("rateFill").style.width = Math.min(100, Math.max(2, (left / wait) * 100)) + "%";
       return;
     }
+    if (state.paused && state.pauseReason === "cover") {
+      // 封面被B站拒收：整条队列暂停 5 分钟自动重试，不是停工，也不会消耗重试次数
+      box.hidden = false;
+      box.dataset.mode = "quota";
+      const at = Number(state.coverResumeAt || 0);
+      const n = (state.tasks || []).filter((t) => t.status === "queued").length;
+      $("rateTitle").textContent = "封面被 B站 拒收 · 队列暂停中";
+      $("rateText").textContent = "封面校验未通过，整条队列暂停 5 分钟（当前 " + n + " 个稿件在队列里，"
+        + "不会因此消耗重试次数）。"
+        + (at > now ? "预计 " + humanWait(at - now) + "后自动重试。" : "正在恢复队列并重试…")
+        + "若反复被拒，多半是封面文件本身格式不对，换一张图再投更稳。";
+      $("rateFill").style.width = "100%";
+      return;
+    }
     if (state.paused && state.pauseReason === "quota") {
       // 两种等待：n+1 触发的 24h 封禁（必须等额度归零）与刚好满 n（等一篇滑出）
       box.hidden = false;
@@ -455,6 +471,29 @@
           + remain + "腾出空位，队列会自动继续投稿，不会重投、无需人工点「继续队列」。";
       }
       $("rateFill").style.width = "100%";
+      return;
+    }
+    if (state.paused) {
+      // v108：任何原因的暂停都要有横幅——手动暂停/连续限流/重启沿用如果只在队列页
+      // 显示一个小标签，用户很容易以为「队列在跑但没动」。
+      const reason = state.pauseReason || "";
+      const n = (state.tasks || []).filter((t) => t.status === "queued").length;
+      box.hidden = false;
+      box.dataset.mode = reason === "rate" ? "ban" : "manual";
+      if (reason === "rate") {
+        $("rateTitle").textContent = "连续触发 B站 限流 · 队列已暂停";
+        $("rateText").textContent = "B站接口连续限流，队列已停止投稿，需人工核对后点「继续队列」。"
+          + "当前 " + n + " 个稿件仍排队，不会丢失。";
+      } else if (reason === "boot") {
+        $("rateTitle").textContent = "队列在重启后保持暂停";
+        $("rateText").textContent = "程序启动时沿用了上次的暂停状态，投稿不会自动开始；"
+          + "确认无误后点「继续队列」。当前 " + n + " 个稿件在队列中。";
+      } else {
+        $("rateTitle").textContent = "队列已暂停 · 稿件排队中";
+        $("rateText").textContent = "投稿已暂停，队列不会再往下投；当前 " + n + " 个稿件保持排队。"
+          + "点「继续队列」立即恢复，稿件不会重投。";
+      }
+      $("rateFill").style.width = "0%";
       return;
     }
     box.hidden = true;
@@ -486,6 +525,7 @@
       state.paused = !!(r.queue && r.queue.paused);
       state.pauseReason = (r.queue && r.queue.pause_reason) || "";
       state.quotaResumeAt = Number((r.queue && r.queue.quota_resume_at) || 0);
+      state.coverResumeAt = Number((r.queue && r.queue.cover_resume_at) || 0);
       state.quotaBanUntil = Number((r.queue && r.queue.quota_ban_until) || 0);
       state.rateUntil = (r.queue && r.queue.rate_until) || 0;
       state.rateWait = (r.queue && r.queue.rate_wait) || 0;

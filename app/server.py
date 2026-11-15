@@ -30,7 +30,7 @@ WEB_DIR = os.path.join(BASE_DIR, "web")
 UPLOAD_DIR = os.path.join(store.DATA_DIR, "uploads")
 COVER_DIR = os.path.join(store.DATA_DIR, "covers")
 
-APP_VERSION = "v106"
+APP_VERSION = "v108"
 
 app = Flask(__name__, static_folder=WEB_DIR, static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = None  # 视频文件大，不限制
@@ -635,6 +635,7 @@ def bootstrap():
                   "rate_until": worker.rate_until(), "rate_wait": worker.rate_wait(),
                   "pause_reason": worker.pause_reason(),
                   "quota_resume_at": worker.quota_resume_at(),
+                  "cover_resume_at": worker.cover_resume_at(),
                   "quota_ban_until": float(cfg.get("quota_ban_until") or 0.0),
                   "auto_resume": cfg.get("auto_resume", True) is not False},
         "partitions": [{"tid": t, "name": n} for t, n in partitions.load(cfg)],
@@ -1200,6 +1201,7 @@ def tasks():
         "queue": {"paused": worker.is_paused(), "current": worker.current_task_id(),
                   "rate_until": ru, "rate_wait": rw,
                   "pause_reason": pr, "quota_resume_at": ra,
+                  "cover_resume_at": worker.cover_resume_at(),
                   "quota_ban_until": ban, "auto_resume": ar},
         "counts": store.count_status(),
         "quota": q,

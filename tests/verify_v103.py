@@ -133,8 +133,9 @@ def wait_for(n, secs=3.0):
 
 set_notify(enabled=True, url=hook_url, kind="raw")
 worker._summary({"title": "测试稿件"}, "投稿成功", "success")
+# v108 起推送正文统一带「【账号：…】」前缀，这里只校验事件与核心文案
 check("投稿结果真实推送", wait_for(1) and received[0].get("event") == "task"
-      and received[0].get("text") == "投稿成功", str(received[:1]))
+      and "投稿成功" in (received[0].get("text") or ""), str(received[:1]))
 
 worker._notify("rate", "投稿被 B站 接口限流", "连续 1 次触发限流", "warn")
 check("限流事件真实推送", wait_for(2) and received[1].get("event") == "rate")

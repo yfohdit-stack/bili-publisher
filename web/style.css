@@ -2012,5 +2012,12 @@ body[data-view="queue"] .task .thumb {
 .rate-banner[data-mode="ban"] .rate-track { background: rgba(138, 47, 30, .14); }
 .rate-banner[data-mode="ban"] .rate-track i { background: #d9534f; }
 [data-theme="dark"] .rate-banner[data-mode="ban"] { background: #40221d; border-color: #6d3830; color: #f3b8ac; }
+/* 手动暂停 / 重启沿用暂停（v108）：不是故障也不是等待，用中性灰，别跟限流橙/额度蓝抢注意力 */
+.rate-banner[data-mode="manual"] { background: #f3f4f6; border-color: #dcdfe4; color: #4a5260; }
+.rate-banner[data-mode="manual"] .rate-ico { background: #8b93a1; }
+.rate-banner[data-mode="manual"] .rate-track { background: rgba(74, 82, 96, .12); }
+.rate-banner[data-mode="manual"] .rate-track i { background: #8b93a1; }
+[data-theme="dark"] .rate-banner[data-mode="manual"] { background: #24262b; border-color: #3a3d44; color: #c8ccd4; }
+[data-theme="dark"] .rate-banner[data-mode="manual"] .rate-track { background: rgba(200, 204, 212, .16); }
 [data-theme="dark"] .rate-banner[data-mode="ban"] .rate-track { background: rgba(243, 184, 172, .16); }
 

@@ -60,6 +60,12 @@ WATCHDOG_INTERVAL = 60
 # 否则下一轮会按B站那份「还没有这篇稿」的列表算额度，一路放行到越界。
 SUBMIT_PROGRESS_MARK = 0.9
 
+# 封面被B站拒收（ValueError: 封面不合法 Picture(...)）：跟接口频率无关，
+# 也不是稿件内容问题——B站侧对刚用过的封面/图片处理结果要过一会儿才认。
+# 按用户口径：第一次遇到就把整条队列暂停 5 分钟，到点自动继续重试，
+# 并且不消耗任务的重试次数（否则第 2 次同样的报错就直接判死）。
+COVER_INVALID_WAIT = 300
+
 # 状态通知：同一事件文案在短时间内重复出现只推一次（限流/额度复查可能连击），
 # 失败日志也做节流，避免 Webhook 挂掉时把总日志刷满。
 NOTIFY_DEDUP_SECS = 20.0
@@ -79,6 +85,8 @@ _paused = threading.Event()
 _pause_reason = "manual"
 _quota_resume_at = 0.0          # 额度最早腾出空位的时刻；0 表示改用兜底轮询
 _quota_last_check = 0.0         # 上次复查额度的时刻，控制接口调用频率
+_cover_until = 0.0              # 封面拒收后的自动重试时刻（reason=cover 时有效）
+_cover_acct = ""                # 触发封面暂停的账号显示名，恢复推送里用
 _wake = threading.Event()       # 事件驱动：新建/取消/切换状态时唤醒，替代固定 2 秒空查
 _cancel_requested: set[str] = set()
 _current: Dict[str, Any] = {"task_id": "", "started_at": 0.0}
@@ -90,7 +98,7 @@ _last_stage: Dict[str, Any] = {"task_id": "", "at": 0.0, "progress": -1.0, "labe
 # ------------------------------------------------------------------ 控制
 
 def start() -> None:
-    global _thread, _pause_reason, _quota_resume_at, _quota_last_check
+    global _thread, _pause_reason, _quota_resume_at, _quota_last_check, _cover_until
     with _state_lock:
         if _thread and _thread.is_alive():
             return
@@ -120,6 +128,9 @@ def start() -> None:
         # 重启后沿用上次算出的腾位时刻，避免刚启动就多打一次额度接口
         _quota_resume_at = (float(cfg.get("quota_resume_at") or 0.0)
                             if _pause_reason == "quota" else 0.0)
+        # 封面拒收等待也要跨重启：否则升级/重启会立刻拿同一张封面再撞一次
+        _cover_until = (float(cfg.get("cover_resume_at") or 0.0)
+                        if _pause_reason == "cover" else 0.0)
         _quota_last_check = 0.0
         recover_interrupted()
         # 收拾孤儿占位：任务已被删除/清空，账本里对应的 inflight 行要一起撤掉，
@@ -203,9 +214,10 @@ def pause(flag: bool = True, reason: Optional[str] = None) -> bool:
     reason 只在不改变暂停状态时也可能需要落盘（比如额度满时队列本就暂停），
     所以写配置的判断不能只看 changed。manual=用户主动暂停（绝不自动恢复），
     boot=部署/重启的保护性暂停（受设置 auto_resume 控制，开启时自动解除），
-    quota=24h 额度满/封禁自动暂停（额度归零后自动继续），rate=连续限流待人工核对。
+    quota=24h 额度满/封禁自动暂停（额度归零后自动继续），rate=连续限流待人工核对，
+    cover=封面被B站拒收后限时等待（到点自动继续重试）。
     """
-    global _pause_reason, _quota_resume_at, _quota_last_check
+    global _pause_reason, _quota_resume_at, _quota_last_check, _cover_until
     changed = _paused.is_set() != bool(flag)
     old_reason = _pause_reason
     if flag:
@@ -219,6 +231,9 @@ def pause(flag: bool = True, reason: Optional[str] = None) -> bool:
     if _pause_reason != "quota":
         # 非额度等待态不该残留腾位时刻（人工暂停/限流暂停/恢复）
         _quota_resume_at = 0.0
+    if _pause_reason != "cover":
+        # 封面等待时刻同理：换了暂停原因就不能再按旧的封面计时开投
+        _cover_until = 0.0
     # 原因变了也要落盘：额度等待中再点「暂停队列」，暂停状态没变但意图已从
     # 「等额度自动续投」变成「人工停工」，不写盘的话重启会按残留的 quota 擅自开投。
     if changed or reason is not None or old_reason != _pause_reason:
@@ -226,7 +241,8 @@ def pause(flag: bool = True, reason: Optional[str] = None) -> bool:
         try:
             store.patch_config({"paused_queue": bool(flag),
                                 "paused_reason": _pause_reason,
-                                "quota_resume_at": float(_quota_resume_at)})
+                                "quota_resume_at": float(_quota_resume_at),
+                                "cover_resume_at": float(_cover_until)})
         except Exception as e:  # 状态在内存里仍已生效，不能因为写配置失败继续投稿
             try:
                 store.add_global_log(f"队列暂停状态保存失败：{type(e).__name__}: {e}", "warn")
@@ -247,8 +263,10 @@ def pause_for_quota(q: Dict[str, Any]) -> None:
     reason = str(q.get("error") or "近 24h 投稿额度已满")
     when = (f"预计 {time.strftime('%m-%d %H:%M', time.localtime(_quota_resume_at))} 复查额度"
             if _quota_resume_at else "将按兜底间隔继续复查额度")
+    who = _acct_display()
     _notify("quota", "队列已暂停：24h 投稿额度已满 / 封禁",
-            f"{reason}。稿件继续排队不会被丢弃，{when}，腾出空位后自动续投。", "warn")
+            f"【账号：{who}】{reason}。稿件继续排队不会被丢弃，{when}，腾出空位后自动续投。",
+            "warn")
 
 
 # 额度没算出腾位时刻时的兜底复查间隔；算出时刻之前完全不请求接口。
@@ -278,8 +296,8 @@ def _maybe_resume_quota(now: float) -> bool:
         store.add_global_log("24h 投稿额度已腾出空位，队列自动继续投稿", "ok")
         # v103：封禁解除 / 额度归零后自动开投，主动推一条，不用再盯浏览器。
         _notify("resume", "额度已恢复，队列自动继续投稿",
-                "24h 投稿额度已腾出空位（封禁解除或额度归零），队列已自动恢复，"
-                "无需人工点「继续队列」。", "success")
+                f"【账号：{_acct_display()}】24h 投稿额度已腾出空位（封禁解除或额度归零），"
+                "队列已自动恢复，无需人工点「继续队列」。", "success")
         return True
     nxt = float(q.get("next_release_at") or 0.0)
     _quota_resume_at = nxt if nxt > now else 0.0
@@ -298,6 +316,26 @@ def pause_reason() -> str:
 def quota_resume_at() -> float:
     """额度满自动暂停时，预计腾出空位的时刻（0 = 未知，按兜底间隔复查）。"""
     return _quota_resume_at if _pause_reason == "quota" else 0.0
+
+
+def _maybe_resume_cover(now: float) -> bool:
+    """封面拒收等待到点：自动解除暂停，队列继续重试该稿件。
+
+    只对 reason=cover 生效；人工暂停（manual）与连续限流（rate）一律不碰。
+    """
+    global _cover_until, _cover_acct
+    if not _paused.is_set() or _pause_reason != "cover":
+        return False
+    if _cover_until > now:
+        return False
+    _cover_until = 0.0
+    pause(False)
+    store.add_global_log("封面拒收等待结束，队列自动继续重试", "ok")
+    _notify("resume", "封面等待结束，队列自动继续投稿",
+            f"【账号：{_cover_acct or _acct_display()}】封面被B站拒收后已等待 "
+            f"{COVER_INVALID_WAIT // 60} 分钟，队列已自动恢复，原先失败的稿件会重新尝试投稿，"
+            "无需人工点「继续队列」。", "success")
+    return True
 
 
 def current_task_id() -> str:
@@ -525,6 +563,22 @@ def _acct_label(account_id: str) -> str:
     return account_id[:10]
 
 
+def _acct_display(task: Optional[Dict[str, Any]] = None) -> str:
+    """推送/日志里显示的账号名：任务绑定账号优先，未绑定退回当前生效账号。
+
+    v108：Webhook 正文要能看出是哪个号投的——多账号下只说「投稿成功」等于没说。
+    """
+    acct = ""
+    if task:
+        acct = str(task.get("account_id") or "")
+    if not acct:
+        try:
+            acct = str(store.active_account_id() or "")
+        except Exception:
+            acct = ""
+    return _acct_label(acct)
+
+
 def _blocked_accounts(now: Optional[float] = None) -> Dict[str, float]:
     """返回 {account_id: 解除阻塞的时刻}，供主循环跳过这些账号的任务。
 
@@ -650,6 +704,53 @@ def _rate_limit_backoff(tid: str, task: Dict[str, Any], err: str) -> None:
     _clear_cancel(tid)
 
 
+def _cover_invalid(text: str) -> bool:
+    """B站把封面判为不合法（ValueError: 封面不合法 Picture(...)）。
+
+    典型原文：
+      ValueError: 封面不合法 Picture(height='572', width='1146',
+      imageType='png', size=138, url='file:///.../covers/xxx.jpg')
+    这类报错是B站对图片本身的校验，不是接口限流，也不该按普通失败消耗重试次数。
+    """
+    t = text or ""
+    if "封面不合法" in t:
+        return True
+    # 少数版本只回 Picture(...) 和 imageType，没带中文短语
+    if "Picture(" in t and "imageType" in t:
+        return True
+    return False
+
+
+def cover_resume_at() -> float:
+    """封面拒收等待时的自动重试时刻（0 = 不在该等待态）。"""
+    return _cover_until if _pause_reason == "cover" else 0.0
+
+
+def _cover_invalid_backoff(tid: str, task: Dict[str, Any], err: str) -> None:
+    """封面被B站拒收：整条队列暂停 COVER_INVALID_WAIT 秒，到点自动继续重试。
+
+    - 任务留在 queued、不消耗 attempts：这是封面校验不是稿件内容问题，
+      连撞两次同样的报错不该直接把稿件判死。
+    - 暂停是「整条队列」而不是单账号：用户口径就是停下来等 5 分钟再试，
+      期间不投其它稿，避免把同一张图/同一时刻的封面推到别的稿件上。
+    """
+    global _cover_until, _cover_acct
+    now = time.time()
+    _cover_until = now + COVER_INVALID_WAIT
+    _cover_acct = _acct_display(task)
+    pause(True, "cover")
+    title = (task.get("title") or "未命名稿件").strip()[:40]
+    msg = (f"封面被B站拒收（第 {int(task.get('attempts') or 0) + 1} 次尝试），"
+           f"队列暂停 {COVER_INVALID_WAIT // 60} 分钟后自动重试")
+    store.update_task(tid, status="queued", attempts=int(task.get("attempts") or 0),
+                      error=err, speed=0, stage="封面校验", message=msg)
+    _log(tid, f"{msg}：{err[:200]}", "warn")
+    store.add_global_log(f"《{title}》{msg}，稿件保留在队列里不会重投别的稿", "warn")
+    # task 事件推一条：这是稿件层面的结果，用户需要知道停了
+    _summary(task, msg, "warn")
+    _clear_cancel(tid)
+
+
 def _risk_cooling(account_id: Optional[str] = None) -> float:
     """兼容旧调用：不传账号时返回所有账号中最长的剩余冷却。"""
     now = time.time()
@@ -687,6 +788,9 @@ def _loop() -> None:
     while not _stop.is_set():
         try:
             if _paused.is_set():
+                # 封面拒收等待：到点自动继续（与额度等待互不影响）
+                if _maybe_resume_cover(time.time()):
+                    continue
                 # 额度满自动暂停：到点复查额度，腾出空位自动继续（人工暂停不受影响）
                 if _maybe_resume_quota(time.time()):
                     continue
@@ -957,8 +1061,9 @@ def _reset_stage(task_id: str = "") -> None:
 def _notify(event: str, title: str, text: str, level: str = "info") -> None:
     """状态通知入口：没填 Webhook 就完全不触发，发送丢独立线程，失败不阻塞队列。
 
-    调用点（v103）：_summary（投稿结果）、pause_for_quota（额度暂停 / 24h 封禁）、
-    _maybe_resume_quota（封禁解除自动续投）、_rate_limit_backoff（限流卡住）。
+    调用点：_summary（投稿结果 / 封面拒收）、pause_for_quota（额度暂停 / 24h 封禁）、
+    _maybe_resume_quota（封禁解除自动续投）、_maybe_resume_cover（封面等待结束）、
+    _rate_limit_backoff（限流卡住）。
     """
     try:
         cfg = store.load_config()
@@ -1016,11 +1121,16 @@ def _notify_send(cfg: Dict[str, Any], event: str, title: str,
 
 def _summary(task: Dict[str, Any], text: str, level: str = "info",
              push: bool = True) -> None:
-    """把稿件最终结果写进总日志（带标题，过程仍在任务日志里），并按需推送。"""
+    """把稿件最终结果写进总日志（带标题，过程仍在任务日志里），并按需推送。
+
+    v108：推送正文带上账号，多账号时能一眼看出是哪一号的结果。
+    """
     title = (task.get("title") or "未命名稿件").strip()[:40]
-    store.add_global_log(f"《{title}》{text}", level)
+    who = _acct_display(task)
+    line = f"【账号：{who}】{text}"
+    store.add_global_log(f"《{title}》{line}", level)
     if push:
-        _notify("task", f"《{title}》", text, level)
+        _notify("task", f"《{title}》", line, level)
 
 
 def _cleanup_files(task: Dict[str, Any]) -> int:
@@ -1406,6 +1516,11 @@ def _handle(task: Dict[str, Any]) -> float:
                     reserved["on"] = False
             except Exception:   # noqa: BLE001  账本异常不影响失败处理
                 pass
+        # 封面被B站拒收：不属于接口限流，也不是稿件内容错误。按口径整条队列
+        # 暂停 5 分钟后自动重试，且不消耗 attempts（第 2 次同样报错不会直接判死）。
+        if _cover_invalid(err):
+            _cover_invalid_backoff(tid, task, err)
+            return 0.0
         # 限流（封面 -702 / 预上传 406、429）与验证码风控是两类问题：前者是平台
         # 窗口，等 1 或 5 分钟就能再探（406 的 10 分钟窗口内 5min/10min 各探一次），
         # 不该消耗稿件的失败重试次数；后者才按账号冷却。限流判断放在风控前面，
