@@ -145,7 +145,7 @@ check("横幅默认隐藏、由状态驱动", 'id="rateBanner" hidden' in html)
 
 ver = [ln.split('"')[1] for ln in server_py.splitlines() if "APP_VERSION =" in ln][0]
 check("版本号与静态资源 ?v= 同步", ("?v=" + ver.lstrip("v")) in html, ver)
-check("大版本为 v108", ver == "v108", ver)
+check("大版本不低于 v108", int(ver.lstrip("v")) >= 108, ver)
 
 print("\n" + "=" * 56)
 print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")

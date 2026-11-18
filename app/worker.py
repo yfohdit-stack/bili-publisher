@@ -517,13 +517,25 @@ def _history(now: Optional[float] = None, account_id: str = _ACCT_DEFAULT) -> Li
 
 
 def _wait_from(h: List[float], need: int, now: float) -> int:
-    """给一份已过滤好的窗口记录，算还要等几秒才腾得下 need 个名额。"""
+    """给一份已过滤好的窗口记录，算还要等几秒才腾得下 need 个名额。
+
+    v109 修越界：`over = len(h) + need - WINDOW_MAX` 直接当 `h` 的下标，
+    一旦 need > WINDOW_MAX（多分P 稿件 11P 以上）就有 over - 1 >= len(h)，
+    `h[over - 1]` 抛 IndexError。窗口里只要有记录（连续投稿时必然有）就必崩，
+    而 _handle 会把它当普通投稿失败：连撞两次重试后任务被判死，看起来就是
+    「>10P 稿件连续投稿必定失败」。
+
+    语义上窗口一次最多只容 WINDOW_MAX 个名额，超出部分本来就腾不出来：
+    按 WINDOW_MAX 计算等待（即等窗口里的记录全部滑出），下标再做一次兜底钳制。
+    """
     if need <= 0 or not h:
         return 0
+    need = min(int(need), WINDOW_MAX)
     over = len(h) + need - WINDOW_MAX
     if over <= 0:
         return 0
-    return max(1, int(h[over - 1] + WINDOW_SECS - now) + 1)
+    idx = min(over, len(h)) - 1
+    return max(1, int(h[idx] + WINDOW_SECS - now) + 1)
 
 
 def _wait_seconds(need: int = 1, now: Optional[float] = None,
