@@ -65,6 +65,10 @@ SUBMIT_PROGRESS_MARK = 0.9
 # 按用户口径：第一次遇到就把整条队列暂停 5 分钟，到点自动继续重试，
 # 并且不消耗任务的重试次数（否则第 2 次同样的报错就直接判死）。
 COVER_INVALID_WAIT = 300
+# 同一稿件的封面连续被拒收上限（v110）：坏封面不会因为等 5 分钟就变好，
+# 没有出口就是「投→拒→全队列停 5 分钟」无限循环，把其它账号的稿件全堵住、
+# Webhook 每轮刷两条。到上限直接判失败、队列继续投别人的稿，由用户换图重排。
+COVER_INVALID_MAX = 3
 
 # 状态通知：同一事件文案在短时间内重复出现只推一次（限流/额度复查可能连击），
 # 失败日志也做节流，避免 Webhook 挂掉时把总日志刷满。
@@ -745,17 +749,37 @@ def _cover_invalid_backoff(tid: str, task: Dict[str, Any], err: str) -> None:
       连撞两次同样的报错不该直接把稿件判死。
     - 暂停是「整条队列」而不是单账号：用户口径就是停下来等 5 分钟再试，
       期间不投其它稿，避免把同一张图/同一时刻的封面推到别的稿件上。
+    - v110 出口：同一稿件累计被拒 COVER_INVALID_MAX 次后不再暂停，直接判失败，
+      队列立刻继续投其它稿件。没有这个上限，一张真坏掉的封面会无限循环
+      「投→拒→全队列停 5 分钟」，把其它账号的稿全堵死、Webhook 每轮刷两条。
     """
     global _cover_until, _cover_acct
     now = time.time()
+    title = (task.get("title") or "未命名稿件").strip()[:40]
+    hits = int(task.get("cover_hits") or 0) + 1
+
+    if hits >= COVER_INVALID_MAX:
+        store.update_task(tid, status="failed", cover_hits=hits,
+                          attempts=int(task.get("attempts") or 0), error=err, speed=0,
+                          stage="封面校验", finished_at=now,
+                          message=(f"封面连续 {hits} 次被B站拒收，已停止自动重试："
+                                   f"请更换封面后点「重新排队」"))
+        _log(tid, f"封面连续 {hits} 次被B站拒收，停止自动重试：{err[:200]}", "error")
+        store.add_global_log(
+            f"《{title}》封面连续 {hits} 次被B站拒收，已停止重试；队列继续投其它稿件", "error")
+        _summary(task, f"封面连续 {hits} 次被B站拒收，已停止自动重试，"
+                       f"请更换封面后重新排队", "error")
+        _clear_cancel(tid)
+        return
+
     _cover_until = now + COVER_INVALID_WAIT
     _cover_acct = _acct_display(task)
     pause(True, "cover")
-    title = (task.get("title") or "未命名稿件").strip()[:40]
-    msg = (f"封面被B站拒收（第 {int(task.get('attempts') or 0) + 1} 次尝试），"
-           f"队列暂停 {COVER_INVALID_WAIT // 60} 分钟后自动重试")
+    msg = (f"封面被B站拒收（第 {hits}/{COVER_INVALID_MAX} 次），"
+           f"队列暂停 {COVER_INVALID_WAIT // 60} 分钟后自动重试；"
+           f"累计 {COVER_INVALID_MAX} 次仍被拒会判定失败并继续投其它稿件")
     store.update_task(tid, status="queued", attempts=int(task.get("attempts") or 0),
-                      error=err, speed=0, stage="封面校验", message=msg)
+                      cover_hits=hits, error=err, speed=0, stage="封面校验", message=msg)
     _log(tid, f"{msg}：{err[:200]}", "warn")
     store.add_global_log(f"《{title}》{msg}，稿件保留在队列里不会重投别的稿", "warn")
     # task 事件推一条：这是稿件层面的结果，用户需要知道停了

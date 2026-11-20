@@ -405,7 +405,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     error        TEXT DEFAULT '',
     message      TEXT DEFAULT '',
     quota_info   TEXT DEFAULT '',
-    cover_rev    INTEGER DEFAULT 0     -- 换封面时才 +1，供前端做稳定的图片缓存键
+    cover_rev    INTEGER DEFAULT 0,    -- 换封面时才 +1，供前端做稳定的图片缓存键
+    cover_hits   INTEGER DEFAULT 0     -- 本稿被「封面不合法」拒收的次数（v110，防无限重试）
 );
 CREATE TABLE IF NOT EXISTS logs (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -453,6 +454,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE tasks ADD COLUMN schedule_mode TEXT DEFAULT 'bili'")
         if "cover_rev" not in cols:
             conn.execute("ALTER TABLE tasks ADD COLUMN cover_rev INTEGER DEFAULT 0")
+        if "cover_hits" not in cols:
+            conn.execute("ALTER TABLE tasks ADD COLUMN cover_hits INTEGER DEFAULT 0")
         conn.commit()
         _backfill_legacy_accounts(conn)
 
@@ -484,6 +487,7 @@ TASK_FIELDS = (
     "is_only_self", "speed", "cleanup", "schedule_mode", "account_id",
     "files", "bvid", "aid",
     "attempts", "max_attempts", "error", "message", "quota_info", "cover_rev",
+    "cover_hits",
 )
 
 
@@ -540,6 +544,7 @@ def create_task(payload: Dict[str, Any]) -> Dict[str, Any]:
         "message": "",
         "quota_info": "",
         "cover_rev": 0,
+        "cover_hits": 0,
     }
     with _lock:
         conn = connect()

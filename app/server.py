@@ -30,7 +30,7 @@ WEB_DIR = os.path.join(BASE_DIR, "web")
 UPLOAD_DIR = os.path.join(store.DATA_DIR, "uploads")
 COVER_DIR = os.path.join(store.DATA_DIR, "covers")
 
-APP_VERSION = "v109"
+APP_VERSION = "v110"
 
 app = Flask(__name__, static_folder=WEB_DIR, static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = None  # 视频文件大，不限制
@@ -1233,7 +1233,8 @@ def task_action(task_id: str):
         store.add_log(task_id, "定时稿件提前上传", "warn")
     elif action == "retry":
         worker.clear_cancel(task_id)
-        store.update_task(task_id, status="queued", attempts=0, error="", message="重新排队",
+        store.update_task(task_id, status="queued", attempts=0, cover_hits=0, error="",
+                          message="重新排队",
                           progress=0.0, stage="", finished_at=None, speed=0)
         store.add_log(task_id, "重新排队")
     elif action == "delete":
@@ -1331,7 +1332,8 @@ def replace_cover(task_id: str):
     tmp = os.path.join(COVER_DIR, f"raw-{task_id}-{_safe_name(f.filename)}")
     f.save(tmp)
     out = media.normalize_image(tmp, os.path.join(COVER_DIR, f"{task_id}.jpg")) or tmp
-    store.update_task(task_id, cover_path=out)
+    # 换了封面就把「被拒次数」清零，否则新图只有一次机会（v110）
+    store.update_task(task_id, cover_path=out, cover_hits=0)
     store.bump_cover_rev(task_id)
     # normalize 成功后原图就是冗余文件，旧实现会一直堆在 covers/ 里
     if out != tmp:
