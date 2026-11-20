@@ -424,8 +424,74 @@
     const until = Number(state.rateUntil || 0);
     const wait = Number(state.rateWait || 0) || 60;
     const left = until - now;
+    const n = (state.tasks || []).filter((t) => t.status === "queued").length;
+    // v111：暂停态优先。暂停时队列不会自己往下走，限流冷却只是背景信息：
+    // 既不能盖掉「暂停中 / 需人工恢复」的横幅，也不能承诺「预计 X 后自动继续投稿」。
+    const cool = left > 0 ? humanWait(left) : "";
+    const coolTail = cool ? "（另有账号仍在限流冷却，约 " + cool + "后解除）" : "";
+    if (state.paused) {
+      const reason = state.pauseReason || "";
+      box.hidden = false;
+      if (reason === "rate") {
+        box.dataset.mode = "ban";
+        $("rateTitle").textContent = "连续触发 B站 限流 · 队列已暂停";
+        $("rateText").textContent = "B站接口连续限流，队列已停止投稿，需人工核对后点「继续队列」，"
+          + "队列不会自动恢复。当前 " + n + " 个稿件仍排队，不会丢失。"
+          + (cool ? "（该账号限流冷却约 " + cool + " 后解除，但队列仍等人工恢复）" : "");
+        $("rateFill").style.width = "0%";
+        return;
+      }
+      if (reason === "cover") {
+        // 封面被B站拒收：整条队列暂停 5 分钟自动重试，不是停工，也不消耗重试次数
+        box.dataset.mode = "quota";
+        const at = Number(state.coverResumeAt || 0);
+        $("rateTitle").textContent = "封面被 B站 拒收 · 队列暂停中";
+        $("rateText").textContent = "封面校验未通过，整条队列暂停 5 分钟（当前 " + n + " 个稿件在队列里，"
+          + "不会因此消耗重试次数）。"
+          + (at > now ? "预计 " + humanWait(at - now) + "后自动重试。" : "正在恢复队列并重试…")
+          + "若反复被拒，多半是封面文件本身格式不对，换一张图更稳；"
+          + "同一稿件连续 3 次被拒会自动判失败，队列随即继续投其它稿件。"
+          + coolTail;
+        $("rateFill").style.width = "100%";
+        return;
+      }
+      if (reason === "quota") {
+        // 两种等待：n+1 触发的 24h 封禁（必须等额度归零）与刚好满 n（等一篇滑出）
+        const ra = Number(state.quotaResumeAt || 0);
+        const ban = Number(state.quotaBanUntil || 0);
+        const banned = ban > now;
+        box.dataset.mode = banned ? "ban" : "quota";
+        const remain = ra > now ? "预计 " + humanWait(ra - now) + "后" : "正在复查额度，";
+        if (banned) {
+          $("rateTitle").textContent = "24h 投稿封禁中 · 稿件排队中";
+          $("rateText").textContent = "投稿数已达上限 +1，触发 B站 24h 投稿封禁：封禁期内即使额度下降也不能投稿，"
+            + "需等额度归零后自动解封。当前 " + n + " 个稿件在队列中，仍可继续添加；"
+            + remain + "自动解封并继续投稿，不会重投、无需人工值守。" + coolTail;
+        } else {
+          $("rateTitle").textContent = "24h 投稿额度已满 · 稿件排队中";
+          $("rateText").textContent = "当前 " + n + " 个稿件在队列中，仍可继续添加。"
+            + remain + "腾出空位，队列会自动继续投稿，不会重投、无需人工点「继续队列」。" + coolTail;
+        }
+        $("rateFill").style.width = "100%";
+        return;
+      }
+      // v108：任何原因的暂停都要有横幅——手动暂停 / 重启沿用如果只在队列页
+      // 显示一个小标签，用户很容易以为「队列在跑但没动」。
+      box.dataset.mode = "manual";
+      if (reason === "boot") {
+        $("rateTitle").textContent = "队列在重启后保持暂停";
+        $("rateText").textContent = "程序启动时沿用了上次的暂停状态，投稿不会自动开始；"
+          + "确认无误后点「继续队列」。当前 " + n + " 个稿件在队列中。" + coolTail;
+      } else {
+        $("rateTitle").textContent = "队列已暂停 · 稿件排队中";
+        $("rateText").textContent = "投稿已暂停，队列不会再往下投；当前 " + n + " 个稿件保持排队。"
+          + "点「继续队列」立即恢复，稿件不会重投。" + coolTail;
+      }
+      $("rateFill").style.width = "0%";
+      return;
+    }
     if (left > 0) {
-      // 限流冷却优先展示：它是分钟级的即时状态，比额度等待更紧急
+      // 只有队列没暂停时，冷却才真的会「到点自动继续」——这时才允许承诺
       box.hidden = false;
       box.dataset.mode = "rate";
       const longWait = wait >= 300;
@@ -435,66 +501,6 @@
       $("rateText").textContent = "预计 " + humanWait(left) + "后自动继续投稿，稿件保持排队、不会重投"
         + (longWait ? "；若反复触发，请稍后再点「继续队列」。" : "。");
       $("rateFill").style.width = Math.min(100, Math.max(2, (left / wait) * 100)) + "%";
-      return;
-    }
-    if (state.paused && state.pauseReason === "cover") {
-      // 封面被B站拒收：整条队列暂停 5 分钟自动重试，不是停工，也不会消耗重试次数
-      box.hidden = false;
-      box.dataset.mode = "quota";
-      const at = Number(state.coverResumeAt || 0);
-      const n = (state.tasks || []).filter((t) => t.status === "queued").length;
-      $("rateTitle").textContent = "封面被 B站 拒收 · 队列暂停中";
-      $("rateText").textContent = "封面校验未通过，整条队列暂停 5 分钟（当前 " + n + " 个稿件在队列里，"
-        + "不会因此消耗重试次数）。"
-        + (at > now ? "预计 " + humanWait(at - now) + "后自动重试。" : "正在恢复队列并重试…")
-        + "若反复被拒，多半是封面文件本身格式不对，换一张图更稳；"
-        + "同一稿件连续 3 次被拒会自动判失败，队列随即继续投其它稿件。";
-      $("rateFill").style.width = "100%";
-      return;
-    }
-    if (state.paused && state.pauseReason === "quota") {
-      // 两种等待：n+1 触发的 24h 封禁（必须等额度归零）与刚好满 n（等一篇滑出）
-      box.hidden = false;
-      const n = (state.tasks || []).filter((t) => t.status === "queued").length;
-      const ra = Number(state.quotaResumeAt || 0);
-      const ban = Number(state.quotaBanUntil || 0);
-      const banned = ban > now;
-      box.dataset.mode = banned ? "ban" : "quota";
-      const remain = ra > now ? "预计 " + humanWait(ra - now) + "后" : "正在复查额度，";
-      if (banned) {
-        $("rateTitle").textContent = "24h 投稿封禁中 · 稿件排队中";
-        $("rateText").textContent = "投稿数已达上限 +1，触发 B站 24h 投稿封禁：封禁期内即使额度下降也不能投稿，"
-          + "需等额度归零后自动解封。当前 " + n + " 个稿件在队列中，仍可继续添加；"
-          + remain + "自动解封并继续投稿，不会重投、无需人工值守。";
-      } else {
-        $("rateTitle").textContent = "24h 投稿额度已满 · 稿件排队中";
-        $("rateText").textContent = "当前 " + n + " 个稿件在队列中，仍可继续添加。"
-          + remain + "腾出空位，队列会自动继续投稿，不会重投、无需人工点「继续队列」。";
-      }
-      $("rateFill").style.width = "100%";
-      return;
-    }
-    if (state.paused) {
-      // v108：任何原因的暂停都要有横幅——手动暂停/连续限流/重启沿用如果只在队列页
-      // 显示一个小标签，用户很容易以为「队列在跑但没动」。
-      const reason = state.pauseReason || "";
-      const n = (state.tasks || []).filter((t) => t.status === "queued").length;
-      box.hidden = false;
-      box.dataset.mode = reason === "rate" ? "ban" : "manual";
-      if (reason === "rate") {
-        $("rateTitle").textContent = "连续触发 B站 限流 · 队列已暂停";
-        $("rateText").textContent = "B站接口连续限流，队列已停止投稿，需人工核对后点「继续队列」。"
-          + "当前 " + n + " 个稿件仍排队，不会丢失。";
-      } else if (reason === "boot") {
-        $("rateTitle").textContent = "队列在重启后保持暂停";
-        $("rateText").textContent = "程序启动时沿用了上次的暂停状态，投稿不会自动开始；"
-          + "确认无误后点「继续队列」。当前 " + n + " 个稿件在队列中。";
-      } else {
-        $("rateTitle").textContent = "队列已暂停 · 稿件排队中";
-        $("rateText").textContent = "投稿已暂停，队列不会再往下投；当前 " + n + " 个稿件保持排队。"
-          + "点「继续队列」立即恢复，稿件不会重投。";
-      }
-      $("rateFill").style.width = "0%";
       return;
     }
     box.hidden = true;

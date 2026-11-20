@@ -148,8 +148,9 @@ app_js = open(os.path.join(BASE, "web", "app.js"), encoding="utf-8").read()
 html = open(os.path.join(BASE, "web", "index.html"), encoding="utf-8").read()
 check("/api/tasks 与 bootstrap 都下发 cover_resume_at",
       server_py.count("cover_resume_at") >= 2)
+# v111 重排优先级后，cover 分支写成 if (reason === "cover")，判断落在暂停块内部
 check("前端识别 cover 暂停原因并显示倒计时",
-      'state.pauseReason === "cover"' in app_js and "封面被 B站 拒收" in app_js)
+      'reason === "cover"' in app_js and "封面被 B站 拒收" in app_js)
 check("前端保存 coverResumeAt", "coverResumeAt" in app_js)
 ver = [ln.split('"')[1] for ln in server_py.splitlines() if "APP_VERSION =" in ln][0]
 check("版本号与静态资源 ?v= 同步", ("?v=" + ver.lstrip("v")) in html, ver)
