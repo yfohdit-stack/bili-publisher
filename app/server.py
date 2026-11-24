@@ -21,8 +21,8 @@ from typing import Any, Dict, List, Tuple
 
 from flask import g, send_file, Flask, Response, jsonify, request, send_from_directory
 
-from . import (editor, ledger, login, media, notify, partitions, quota, season,
-               store, topic, worker)
+from . import (autopost, editor, ledger, login, media, notify, partitions,
+               quota, season, store, topic, worker)
 from .channels import official
 
 BASE_DIR = store.BASE_DIR
@@ -30,7 +30,7 @@ WEB_DIR = os.path.join(BASE_DIR, "web")
 UPLOAD_DIR = os.path.join(store.DATA_DIR, "uploads")
 COVER_DIR = os.path.join(store.DATA_DIR, "covers")
 
-APP_VERSION = "v111"
+APP_VERSION = "v114"
 
 app = Flask(__name__, static_folder=WEB_DIR, static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = None  # 视频文件大，不限制
@@ -591,6 +591,7 @@ def _public_task(t: Dict[str, Any]) -> Dict[str, Any]:
         "message": t.get("message") or "",
         "has_cover": bool(t.get("cover_path")),
         "cover_rev": int(t.get("cover_rev") or 0),
+        "autopost": bool(t.get("autopost_meta")),
         "created_at": t.get("created_at"),
         "updated_at": t.get("updated_at"),
     }
@@ -642,6 +643,7 @@ def bootstrap():
         "env": env,
         "version": APP_VERSION,
         "counts": store.count_status(),
+        "autopost": autopost.status(),
     })
 
 
@@ -1241,6 +1243,8 @@ def task_action(task_id: str):
         worker.request_cancel(task_id)
         worker.clear_cancel(task_id)
         store.delete_task(task_id)
+        # v113：删任务=「这稿我不要了」，seen 登记保留，文件不会被自动投回。
+        # 旧版在这里 unmark，导致删掉的任务 30 秒后又被扫描入队，坏文件无限循环。
         # 额度占位收尾：任务都删了，还没落地的 inflight 占位一起撤掉，
         # 否则它会白占 24h 额度（已确认/结果未知的记录保留，那是真投出去的稿）
         try:
@@ -1682,6 +1686,78 @@ def health():
     return jsonify({"ok": True, "ts": time.time()})
 
 
+# ------------------------------------------------------------------ 录播自动投稿（v112）
+
+@app.get("/api/autopost")
+def autopost_get():
+    return jsonify({"ok": True, "autopost": autopost.status()})
+
+
+@app.post("/api/autopost")
+def autopost_set():
+    """保存自动投稿配置：总开关 + 扫描间隔 + 多规则整包替换。"""
+    body = request.get_json(force=True, silent=True) or {}
+    cur = autopost.cfg()
+    enabled = bool(body.get("enabled", cur["enabled"]))
+    try:
+        scan_secs = int(body.get("scan_secs", cur["scan_secs"]))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "scan_secs 需要是整数"}), 400
+    if not 10 <= scan_secs <= 600:
+        return jsonify({"ok": False, "error": "扫描间隔需在 10~600 秒之间"}), 400
+    rules_in = body.get("rules")
+    if rules_in is None:
+        rules_in = cur["rules"]
+    if not isinstance(rules_in, list):
+        return jsonify({"ok": False, "error": "rules 需要是数组"}), 400
+    rules: List[Dict[str, Any]] = []
+    for i, r in enumerate(rules_in):
+        if not isinstance(r, dict):
+            return jsonify({"ok": False, "error": f"第 {i + 1} 条规则不是对象"}), 400
+        rule = dict(autopost.RULE_DEFAULTS)
+        rule["id"] = str(r.get("id") or "").strip() or ("r_" + uuid.uuid4().hex[:8])
+        rule["name"] = str(r.get("name") or "").strip()[:40] or f"规则 {i + 1}"
+        rule["enabled"] = bool(r.get("enabled", True))
+        rule["watch_dir"] = str(r.get("watch_dir") or "").strip()
+        mode = str(r.get("mode") or "single").lower()
+        if mode not in ("single", "multi"):
+            return jsonify({"ok": False, "error": f"规则「{rule['name']}」的 mode 只能是 single 或 multi"}), 400
+        rule["mode"] = mode
+        rule["account_id"] = str(r.get("account_id") or "").strip()
+        rule["title_tpl"] = str(r.get("title_tpl") or "").strip()[:120]
+        for key, lo, hi in (("template_id", 0, 10 ** 9), ("stable_secs", 30, 3600),
+                            ("group_idle_secs", 60, 86400), ("min_size_mb", 0, 102400),
+                            ("session_gap_secs", 600, 86400)):
+            try:
+                v = int(r.get(key, rule[key]))
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": f"规则「{rule['name']}」的 {key} 需要是整数"}), 400
+            if not lo <= v <= hi:
+                return jsonify({"ok": False, "error": f"规则「{rule['name']}」的 {key} 需在 {lo}~{hi} 之间"}), 400
+            rule[key] = v
+        if rule["enabled"]:
+            if not rule["watch_dir"]:
+                return jsonify({"ok": False, "error": f"规则「{rule['name']}」启用前请先填写监视目录"}), 400
+            if not os.path.isdir(rule["watch_dir"]):
+                return jsonify({"ok": False,
+                                "error": f"规则「{rule['name']}」目录不存在：{rule['watch_dir']}"
+                                         f"（要填运行本程序那台机器上的绝对路径）"}), 400
+        rules.append(rule)
+    if enabled and not any(r["enabled"] for r in rules):
+        return jsonify({"ok": False, "error": "总开关已启用，但没有启用的规则，请先添加一条规则"}), 400
+    store.patch_config({"autopost": {"enabled": enabled, "scan_secs": scan_secs, "rules": rules}})
+    store.add_global_log(f"自动投稿设置已更新（{'启用' if enabled else '停用'}，{len(rules)} 条规则）")
+    autopost.wake()
+    return jsonify({"ok": True, "autopost": autopost.status()})
+
+
+@app.post("/api/autopost/scan")
+def autopost_scan():
+    """立即触发一轮扫描（异步，结果看状态里的 last_scan / recent）。"""
+    autopost.wake()
+    return jsonify({"ok": True})
+
+
 def create_app() -> Flask:
     store.init_db()
     os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -1693,4 +1769,5 @@ def create_app() -> Flask:
         t = threading.Thread(target=_stats_prefetch_loop, name="stats-prefetch", daemon=True)
         t.start()
     worker.start()
+    autopost.start()
     return app

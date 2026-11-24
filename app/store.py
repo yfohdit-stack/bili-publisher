@@ -65,6 +65,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
                                         "quota": True, "resume": True}},
     "web_auth": {"enabled": False, "mode": "token", "token": "",
                  "username": "", "password": ""},
+    # v112：录播自动投稿（多规则）。每条规则独立配置监视目录/模式/模板/账号。
+    # 直接引用原件上传，投稿成功后把原件移入监视目录下「已投稿」子文件夹；
+    # seen 台账按 路径+体积+mtime 防重复入队。
+    "autopost": {"enabled": False, "scan_secs": 30, "rules": []},
 }
 
 
@@ -406,7 +410,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     message      TEXT DEFAULT '',
     quota_info   TEXT DEFAULT '',
     cover_rev    INTEGER DEFAULT 0,    -- 换封面时才 +1，供前端做稳定的图片缓存键
-    cover_hits   INTEGER DEFAULT 0     -- 本稿被「封面不合法」拒收的次数（v110，防无限重试）
+    cover_hits   INTEGER DEFAULT 0,    -- 本稿被「封面不合法」拒收的次数（v110，防无限重试）
+    autopost_meta TEXT DEFAULT ''      -- 自动投稿任务：JSON {rule_id,rule_name,watch_dir}（v112）
 );
 CREATE TABLE IF NOT EXISTS logs (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -420,6 +425,15 @@ CREATE TABLE IF NOT EXISTS templates (
     name       TEXT NOT NULL,
     payload    TEXT NOT NULL,
     updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS autopost_seen (
+    path       TEXT PRIMARY KEY,   -- 录播目录里的原件绝对路径
+    size       INTEGER DEFAULT 0,  -- 入队时的体积签名：原件被替换/续写后签名变化，允许再投
+    mtime      REAL DEFAULT 0,
+    task_id    TEXT DEFAULT '',
+    group_key  TEXT DEFAULT '',    -- 分P分组键（主播|日期），用于同组第 2 稿加序号
+    title      TEXT DEFAULT '',
+    created_at REAL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_logs_task ON logs(task_id);
@@ -456,6 +470,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE tasks ADD COLUMN cover_rev INTEGER DEFAULT 0")
         if "cover_hits" not in cols:
             conn.execute("ALTER TABLE tasks ADD COLUMN cover_hits INTEGER DEFAULT 0")
+        if "autopost_meta" not in cols:
+            conn.execute("ALTER TABLE tasks ADD COLUMN autopost_meta TEXT DEFAULT ''")
         conn.commit()
         _backfill_legacy_accounts(conn)
 
@@ -487,7 +503,7 @@ TASK_FIELDS = (
     "is_only_self", "speed", "cleanup", "schedule_mode", "account_id",
     "files", "bvid", "aid",
     "attempts", "max_attempts", "error", "message", "quota_info", "cover_rev",
-    "cover_hits",
+    "cover_hits", "autopost_meta",
 )
 
 
@@ -504,10 +520,10 @@ def row_to_task(row: sqlite3.Row) -> Dict[str, Any]:
     return d
 
 
-def create_task(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _build_task(payload: Dict[str, Any]) -> Dict[str, Any]:
     now = time.time()
     tid = payload.get("id") or uuid.uuid4().hex[:12]
-    task = {
+    return {
         "id": tid,
         "created_at": now,
         "updated_at": now,
@@ -545,17 +561,61 @@ def create_task(payload: Dict[str, Any]) -> Dict[str, Any]:
         "quota_info": "",
         "cover_rev": 0,
         "cover_hits": 0,
+        "autopost_meta": payload.get("autopost_meta") or "",
     }
+
+
+def _insert_task(conn: sqlite3.Connection, task: Dict[str, Any]) -> None:
+    cols = ",".join(TASK_FIELDS)
+    placeholders = ",".join("?" for _ in TASK_FIELDS)
+    conn.execute(
+        f"INSERT INTO tasks ({cols}) VALUES ({placeholders})",
+        [json.dumps(task[k], ensure_ascii=False) if k in ("tags", "files") else task[k]
+         for k in TASK_FIELDS],
+    )
+
+
+def create_task(payload: Dict[str, Any]) -> Dict[str, Any]:
+    task = _build_task(payload)
     with _lock:
         conn = connect()
-        cols = ",".join(TASK_FIELDS)
-        placeholders = ",".join("?" for _ in TASK_FIELDS)
-        conn.execute(
-            f"INSERT INTO tasks ({cols}) VALUES ({placeholders})",
-            [json.dumps(task[k], ensure_ascii=False) if k in ("tags", "files") else task[k]
-             for k in TASK_FIELDS],
-        )
-        conn.commit()
+        try:
+            _insert_task(conn, task)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return task
+
+
+def create_autopost_task(payload: Dict[str, Any], entries: List[Dict[str, Any]],
+                         group_key: str) -> Dict[str, Any]:
+    """任务与防重台账同事务写入，任一步失败都不会留下半个任务。"""
+    task = _build_task(payload)
+    now = time.time()
+    with _lock:
+        conn = connect()
+        try:
+            # 同进程锁之外再用数据库写事务串行化，给未来多扫描线程/进程留好防重底线。
+            conn.execute("BEGIN IMMEDIATE")
+            _insert_task(conn, task)
+            for e in entries:
+                old = conn.execute(
+                    "SELECT t.status FROM autopost_seen s LEFT JOIN tasks t ON t.id = s.task_id "
+                    "WHERE s.path = ?", (e["path"],)).fetchone()
+                if (old is not None and old["status"] is not None
+                        and old["status"] not in (
+                            "success", "failed", "cancelled", "blocked", "interrupted")):
+                    raise FileExistsError(f"源文件已有活动任务：{e['path']}")
+                conn.execute(
+                    "INSERT OR REPLACE INTO autopost_seen "
+                    "(path, size, mtime, task_id, group_key, title, created_at) VALUES (?,?,?,?,?,?,?)",
+                    (e["path"], int(e["size"]), float(e["mtime"]),
+                     task["id"], group_key, task["title"], now))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
     return task
 
 
@@ -841,3 +901,160 @@ def delete_template(template_id: int) -> None:
         conn = connect()
         conn.execute("DELETE FROM templates WHERE id = ?", (template_id,))
         conn.commit()
+
+
+# ---------------------------------------------------------------- 自动投稿台账（v112）
+
+def autopost_is_seen(path: str, size: int, mtime: float) -> bool:
+    """是否已有任务占用该路径。
+
+    活动任务无论签名是否变化都占住路径，避免扫描器在 worker 复核前另建任务；
+    终态任务仍按 路径+体积+mtime 判断，原件被替换后可作为新文件投稿。
+    """
+    with _lock:
+        conn = connect()
+        row = conn.execute(
+            "SELECT s.size, s.mtime, t.status FROM autopost_seen s "
+            "LEFT JOIN tasks t ON t.id = s.task_id WHERE s.path = ?", (path,)).fetchone()
+    if row is None:
+        return False
+    if row["status"] is not None and row["status"] not in (
+            "success", "failed", "cancelled", "blocked", "interrupted"):
+        return True
+    return int(row["size"]) == int(size) and abs(float(row["mtime"]) - float(mtime)) < 1.0
+
+
+def autopost_mark(entries: List[Dict[str, Any]], task_id: str,
+                  group_key: str, title: str) -> None:
+    """入队成功后登记原件，防止下一轮扫描重复入队。entries: [{path,size,mtime}]。"""
+    now = time.time()
+    with _lock:
+        conn = connect()
+        for e in entries:
+            conn.execute(
+                "INSERT OR REPLACE INTO autopost_seen "
+                "(path, size, mtime, task_id, group_key, title, created_at) VALUES (?,?,?,?,?,?,?)",
+                (e["path"], int(e["size"]), float(e["mtime"]),
+                 task_id, group_key, title, now))
+        conn.commit()
+
+
+def autopost_group_count(group_key: str) -> int:
+    """同一分P分组已经入队过几个稿件（同一天断播再开，第 2 稿标题加序号）。"""
+    if not group_key:
+        return 0
+    with _lock:
+        conn = connect()
+        row = conn.execute(
+            "SELECT COUNT(DISTINCT task_id) AS n FROM autopost_seen WHERE group_key = ?",
+            (group_key,)).fetchone()
+    return int(row["n"] or 0)
+
+
+def autopost_recent(limit: int = 10) -> List[Dict[str, Any]]:
+    """最近自动入队的稿件（按任务去重），供设置页展示。"""
+    with _lock:
+        conn = connect()
+        rows = conn.execute(
+            "SELECT task_id, title, group_key, MAX(created_at) AS created_at, COUNT(*) AS parts "
+            "FROM autopost_seen GROUP BY task_id ORDER BY created_at DESC LIMIT ?",
+            (int(limit),)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def autopost_seen_count() -> int:
+    with _lock:
+        conn = connect()
+        row = conn.execute("SELECT COUNT(*) AS n FROM autopost_seen").fetchone()
+    return int(row["n"] or 0)
+
+
+def autopost_unmark(task_id: str) -> int:
+    """解除某任务的原件登记（仅供显式「允许重新入队」操作使用）。
+
+    v113 起删除任务不再调用它：删任务=「这稿我不要了」，文件不应被自动
+    重新投回；否则坏文件会形成「删了又出现」的循环。
+    """
+    with _lock:
+        conn = connect()
+        cur = conn.execute("DELETE FROM autopost_seen WHERE task_id = ?", (task_id,))
+        conn.commit()
+    return cur.rowcount or 0
+
+
+def autopost_resign(task_id: str, entries: List[Dict[str, Any]]) -> None:
+    """仅更新台账签名；新代码应使用 autopost_recheck 保证任务与台账原子更新。"""
+    with _lock:
+        conn = connect()
+        try:
+            for e in entries:
+                conn.execute("UPDATE autopost_seen SET size = ?, mtime = ? "
+                             "WHERE task_id = ? AND path = ?",
+                             (int(e["size"]), float(e["mtime"]), task_id, e["path"]))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def autopost_recheck(task_id: str, files: List[Dict[str, Any]]) -> None:
+    """原地保存重判定后的文件信息及 seen 签名，避免中途失败造成重复任务。"""
+    now = time.time()
+    with _lock:
+        conn = connect()
+        try:
+            conn.execute("UPDATE tasks SET files = ?, message = '', stage = '', updated_at = ? "
+                         "WHERE id = ?", (json.dumps(files, ensure_ascii=False), now, task_id))
+            for f in files:
+                path = str(f.get("path") or "")
+                size = int(f.get("src_size") or f.get("size") or 0)
+                mtime = float(f.get("src_mtime") or 0)
+                cur = conn.execute("UPDATE autopost_seen SET size = ?, mtime = ? "
+                                   "WHERE task_id = ? AND path = ?", (size, mtime, task_id, path))
+                if not cur.rowcount:
+                    old = conn.execute("SELECT group_key, title, created_at FROM autopost_seen "
+                                       "WHERE path = ?", (path,)).fetchone()
+                    task = conn.execute("SELECT title FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                    conn.execute(
+                        "INSERT OR REPLACE INTO autopost_seen "
+                        "(path, size, mtime, task_id, group_key, title, created_at) VALUES (?,?,?,?,?,?,?)",
+                        (path, size, mtime, task_id,
+                         old["group_key"] if old else "", old["title"] if old else (task["title"] if task else ""),
+                         old["created_at"] if old else now))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def autopost_recheck_needed() -> bool:
+    with _lock:
+        row = connect().execute(
+            "SELECT 1 FROM tasks WHERE autopost_meta != '' AND status = 'queued' "
+            "AND message LIKE '%源文件已变化%' LIMIT 1").fetchone()
+    return row is not None
+
+
+def autopost_prune(days: int = 30) -> int:
+    """清理任务已不存在且原路径也已消失的旧记录。
+
+    原路径仍存在时可能代表用户主动放弃的任务，必须永久保留 seen，否则 30 天后
+    文件会被重新扫描入队。成功归档后的原路径已消失，可以正常清理。
+    """
+    cutoff = time.time() - max(1, int(days)) * 86400
+    removed = 0
+    with _lock:
+        conn = connect()
+        try:
+            rows = conn.execute(
+                "SELECT path FROM autopost_seen WHERE created_at < ? "
+                "AND task_id NOT IN (SELECT id FROM tasks)", (cutoff,)).fetchall()
+            for row in rows:
+                path = str(row["path"] or "")
+                if path and not os.path.exists(path):
+                    removed += conn.execute("DELETE FROM autopost_seen WHERE path = ?", (path,)).rowcount
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return removed

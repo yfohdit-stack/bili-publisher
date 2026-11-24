@@ -1708,6 +1708,8 @@ body[data-view="queue"] .lcol,
 body[data-view="archive"] .lcol { display: none; }
 body[data-view="templates"] .shell > .wb-grid,
 body[data-view="templates"] .shell > .stat-strip,
+body[data-view="autopost"] .shell > .wb-grid,
+body[data-view="autopost"] .shell > .stat-strip,
 body[data-view="logs"] .shell > .wb-grid,
 body[data-view="logs"] .shell > .stat-strip { display: none; }
 
@@ -2020,4 +2022,17 @@ body[data-view="queue"] .task .thumb {
 [data-theme="dark"] .rate-banner[data-mode="manual"] { background: #24262b; border-color: #3a3d44; color: #c8ccd4; }
 [data-theme="dark"] .rate-banner[data-mode="manual"] .rate-track { background: rgba(200, 204, 212, .16); }
 [data-theme="dark"] .rate-banner[data-mode="ban"] .rate-track { background: rgba(243, 184, 172, .16); }
+
+/* 录播自动投稿规则卡片（v112）：每条规则一个浅边框块，和设置卡片区分层级 */
+.ap-rule { border: 1px solid var(--line); border-radius: 10px; padding: 10px 10px 4px; margin: 8px 0; }
+.ap-rule-head { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.ap-rule-head .checkline { flex: 0 0 auto; margin: 0; }
+.ap-rule-head .ap-r-del { flex: 0 0 auto; color: #d9534f; }
+[data-theme="dark"] .ap-rule { border-color: #3a3d44; }
+/* 自动投稿独立视图（v113）：与模板页同宽居中，两张卡片上下排 */
+.view-autopost { display: block; max-width: 880px; margin-left: auto; margin-right: auto; }
+.view-autopost .ap-card { margin-bottom: 14px; }
+.view-autopost .ap-body { padding: 14px 18px 16px; }
+.view-autopost .card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.view-autopost .head-actions { display: flex; gap: 8px; }
 

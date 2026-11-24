@@ -47,6 +47,7 @@
     coverResumeAt: 0,      // 封面被拒收后自动重试的时刻，用于倒计时
     quotaBanUntil: 0,      // 24h 投稿封禁截止（额度归零）时刻
     quotaToast: false,
+    autopost: null,        // v112 录播自动投稿：config + 运行状态（bootstrap / api/autopost）
     uploading: false,
     sig: null,
     lastFetch: 0,
@@ -214,6 +215,8 @@
     state.quotaBanUntil = Number((r.queue && r.queue.quota_ban_until) || 0);
     state.rateUntil = (r.queue && r.queue.rate_until) || 0;
     state.rateWait = (r.queue && r.queue.rate_wait) || 0;
+    if (r.autopost) state.autopost = r.autopost;
+    renderApStatus();
     renderRateBanner();
     if (r.version) $("appVer").textContent = r.version;
 
@@ -510,6 +513,10 @@
     setInterval(renderRateBanner, 1000);   // 倒计时按秒走，不依赖轮询退避
     schedulePolling();
     setInterval(refreshCountdowns, 30000);
+    // v113：自动投稿视图开着时刷状态（待投文件/最近入队），其它视图不打接口
+    setInterval(() => {
+      if (document.body.dataset.view === "autopost") apRefresh();
+    }, 5000);
     // 概览条：账号累计按天缓存，页面一直开着跨过中午 12:00 时自动换新
     setInterval(() => {
       const st = (state.ovStats || {}).workbench;
@@ -1167,6 +1174,7 @@
           '<div class="task-top">' +
             '<div class="task-title">' + esc(t.title) + "</div>" +
             '<span class="badge ' + b[1] + '">' + b[0] + "</span>" +
+            (t.autopost ? '<span class="badge queued" title="来自录播自动投稿">自动</span>' : "") +
           "</div>" +
           '<div class="meta-line">' +
             '<span class="tag-acc" title="投稿账号" style="' + accChipStyle(t.account_id) + '">@' + esc(accountName(t.account_id)) + "</span>" +
@@ -1679,6 +1687,156 @@
       await loadSeasons(true);
       toast("账号已删除", "ok");
     } catch (e) { toast("删除失败：" + e.message, "err"); }
+  }
+
+  /* ---------------------------------------------------------- 录播自动投稿（v112） */
+
+  function apTplOptions(sel) {
+    let h = '<option value="0">不用模板（用默认参数）</option>';
+    (state.templates || []).forEach((t) => {
+      h += '<option value="' + t.id + '"' + (Number(sel) === t.id ? " selected" : "") + ">"
+        + esc(t.name) + "</option>";
+    });
+    return h;
+  }
+  function apAccOptions(sel) {
+    let h = '<option value="">跟随当前生效账号</option>';
+    (state.accounts || []).forEach((a) => {
+      h += '<option value="' + esc(a.id) + '"' + (String(sel || "") === a.id ? " selected" : "") + ">@"
+        + esc(a.uname || a.id) + "</option>";
+    });
+    return h;
+  }
+  function apRuleHtml(r) {
+    r = r || {};
+    return (
+      '<div class="ap-rule" data-id="' + esc(r.id || "") + '">' +
+        '<div class="ap-rule-head">' +
+          '<label class="checkline" style="margin:0;"><input type="checkbox" class="ap-r-enabled"'
+            + (r.enabled === false ? "" : " checked") + "><span>启用</span></label>" +
+          '<input class="input ap-r-name" placeholder="规则名（如主播名）" value="' + esc(r.name || "") + '" style="flex:1;">' +
+          '<button class="link-btn ap-r-del" type="button">删除</button>' +
+        "</div>" +
+        '<div class="field"><label class="label">监视目录 <span class="counter">运行本程序那台机器上的绝对路径，含子文件夹</span></label>' +
+          '<input class="input ap-r-dir" placeholder="如 D:\\录播 或 /data/recordings" value="' + esc(r.watch_dir || "") + '"></div>' +
+        '<div class="field-row">' +
+          '<div class="field"><label class="label">投稿方式</label><select class="select ap-r-mode">' +
+            '<option value="single"' + (r.mode !== "multi" ? " selected" : "") + ">单独投稿（每个视频一稿）</option>" +
+            '<option value="multi"' + (r.mode === "multi" ? " selected" : "") + ">分P投稿（同子文件夹+同一天合并）</option>" +
+          "</select></div>" +
+          '<div class="field"><label class="label">投稿模板</label><select class="select ap-r-tpl">' + apTplOptions(r.template_id) + "</select></div>" +
+        "</div>" +
+        '<div class="field-row">' +
+          '<div class="field"><label class="label">投稿账号</label><select class="select ap-r-acc">' + apAccOptions(r.account_id) + "</select></div>" +
+          '<div class="field"><label class="label">忽略小于（MB）</label><input class="input ap-r-min" type="number" min="0" max="102400" step="1" value="' + (r.min_size_mb == null ? 10 : r.min_size_mb) + '"></div>' +
+        "</div>" +
+        '<div class="field-row">' +
+          '<div class="field"><label class="label">录制完成静默期（秒） <span class="counter">大小与修改时间都不变才算录完</span></label>' +
+            '<input class="input ap-r-stable" type="number" min="30" max="3600" step="10" value="' + (r.stable_secs || 120) + '"></div>' +
+          '<div class="field"><label class="label">分P合并等待（分钟） <span class="counter">组内这么久没新文件才入队</span></label>' +
+            '<input class="input ap-r-idle" type="number" min="1" max="1440" step="1" value="' + Math.round((r.group_idle_secs || 600) / 60) + '"></div>' +
+        "</div>" +
+        '<div class="field-row">' +
+          '<div class="field"><label class="label">场次间隔（小时） <span class="counter">同天相邻文件超过此时长就另起一稿，下午场晚场不合并</span></label>' +
+            '<input class="input ap-r-gap" type="number" min="0.2" max="24" step="0.5" value="' + ((r.session_gap_secs || 7200) / 3600) + '"></div>' +
+          '<div class="field"></div>' +
+        "</div>" +
+        '<div class="field"><label class="label">标题模板 <span class="counter">占位符 {文件名} {日期} {主播}，留空用默认</span></label>' +
+          '<input class="input ap-r-title" placeholder="单独：{文件名}；分P：{主播} {日期} 录播" value="' + esc(r.title_tpl || "") + '"></div>' +
+      "</div>"
+    );
+  }
+  function apAddRuleCard(r) {
+    $("apRules").insertAdjacentHTML("beforeend", apRuleHtml(r));
+  }
+  function apFill() {
+    const ap = state.autopost || {};
+    const c = ap.config || {};
+    if ($("apEnable")) $("apEnable").checked = !!c.enabled;
+    if ($("apScanSecs")) $("apScanSecs").value = c.scan_secs || 30;
+    if ($("apRules")) {
+      $("apRules").innerHTML = "";
+      (c.rules || []).forEach((r) => apAddRuleCard(r));
+    }
+    renderApStatus();
+  }
+  function apCollect() {
+    const rules = [];
+    $("apRules").querySelectorAll(".ap-rule").forEach((card) => {
+      const v = (cls) => { const n = card.querySelector(cls); return n ? n.value : ""; };
+      rules.push({
+        id: card.dataset.id || "",
+        name: v(".ap-r-name").trim(),
+        enabled: card.querySelector(".ap-r-enabled").checked,
+        watch_dir: v(".ap-r-dir").trim(),
+        mode: v(".ap-r-mode") || "single",
+        template_id: Number(v(".ap-r-tpl")) || 0,
+        account_id: v(".ap-r-acc"),
+        title_tpl: v(".ap-r-title").trim(),
+        stable_secs: Number(v(".ap-r-stable")) || 120,
+        group_idle_secs: (Number(v(".ap-r-idle")) || 10) * 60,
+        session_gap_secs: Math.round((Number(v(".ap-r-gap")) || 2) * 3600),
+        min_size_mb: Number(v(".ap-r-min")) || 0,
+      });
+    });
+    return {
+      enabled: $("apEnable").checked,
+      scan_secs: Number($("apScanSecs").value) || 30,
+      rules: rules,
+    };
+  }
+  async function apSave() {
+    try {
+      const r = await api("/api/autopost", { method: "POST", body: apCollect() });
+      state.autopost = r.autopost;
+      apFill();
+      toast("自动投稿设置已保存", "ok");
+    } catch (e) {
+      toast("保存失败：" + e.message, "err", 6000);
+    }
+  }
+  async function apRefresh() {
+    try {
+      const r = await api("/api/autopost");
+      state.autopost = r.autopost;
+      renderApStatus();
+    } catch (e) { /* 抽屉开着时轮询失败不打扰 */ }
+  }
+  async function apScanNow() {
+    try {
+      await api("/api/autopost/scan", { method: "POST" });
+      toast("已触发扫描，稍候看状态", "ok");
+      setTimeout(apRefresh, 1500);
+    } catch (e) {
+      toast("扫描失败：" + e.message, "err");
+    }
+  }
+  function renderApStatus() {
+    const box = $("apStatus");
+    if (!box) return;
+    const ap = state.autopost;
+    if (!ap) { box.textContent = "未启用"; return; }
+    const now = Date.now() / 1000;
+    let s = ap.running ? "运行中" : (ap.enabled ? "已启用（等待扫描）" : "未启用");
+    if (ap.last_scan) s += " · 上次扫描 " + humanWait(Math.max(0, now - ap.last_scan)) + "前";
+    if (ap.ingested) s += " · 本次运行已入队 " + ap.ingested + " 稿";
+    if (ap.last_error) s += " · " + ap.last_error;
+    box.textContent = s;
+    const pd = $("apPending");
+    if (pd) {
+      const list = (ap.pending || []).slice(0, 5);
+      pd.textContent = list.length
+        ? "待投：" + list.map((x) => x.name + "（" + x.reason + "）").join("、")
+          + ((ap.pending || []).length > 5 ? " 等 " + ap.pending.length + " 项" : "")
+        : "";
+    }
+    const rc = $("apRecent");
+    if (rc) {
+      const list = (ap.recent || []).slice(0, 3);
+      rc.textContent = list.length
+        ? "最近入队：" + list.map((x) => "《" + x.title + "》" + (x.parts > 1 ? "（" + x.parts + "P）" : "")).join("、")
+        : "";
+    }
   }
 
   function openDrawer() {
@@ -2504,6 +2662,17 @@
     $("drawerMask").addEventListener("click", closeDrawer);
     $("btnSaveSettings").addEventListener("click", saveSettings);
     $("btnSaveCookie").addEventListener("click", saveCookie);
+    // v112 录播自动投稿
+    $("apAddRule").addEventListener("click", () => { apAddRuleCard(null); });
+    $("apSave").addEventListener("click", apSave);
+    $("apScan").addEventListener("click", apScanNow);
+    $("apRules").addEventListener("click", (e) => {
+      const del = e.target.closest(".ap-r-del");
+      if (del) {
+        const card = del.closest(".ap-rule");
+        if (card) card.remove();
+      }
+    });
     $("btnCleanNow").addEventListener("click", cleanNow);
     $("btnNotifyTest").addEventListener("click", testNotify);
     $("notifyKind").addEventListener("change", syncNotifyRows);
@@ -2748,7 +2917,7 @@
   }
 
   // 导航外观唯一入口：active / aria-current / 面包屑 / 页面标题 / 独立区块显隐
-  const STUDIO_VIEWS = ["workbench", "queue", "archive", "templates", "logs"];
+  const STUDIO_VIEWS = ["workbench", "queue", "archive", "templates", "autopost", "logs"];
   const STUDIO_META = {
     workbench: ["工作台", "Workspace", "开始今天的投稿",
       "填写稿件、加入队列，程序会按顺序自动上传。账号额度、失败重试与定时发布都在后台替你把关。"],
@@ -2758,6 +2927,8 @@
       "直接读取账号在 B 站的稿件列表，可编辑或跳转，支持按状态筛选。"],
     templates: ["模板", "Templates", "投稿模板",
       "把常用的分区、标签、简介、合集与话题存成模板，下次一键套用。在新建投稿里点「存为模板」即可新增。"],
+    autopost: ["自动投稿", "AutoPost", "录播自动投稿",
+      "监视录播软件的输出目录，录制完成的视频自动套模板入队；支持单独投稿或按场次合并分P，投成功后原件移入「已投稿」。"],
     logs: ["运行日志", "Logs", "运行日志",
       "程序上传、重试、风控拦截与账号额度变化都记录在这里。默认展示最近 150 条，随队列轮询自动更新。"],
   };
@@ -2783,6 +2954,8 @@
     document.body.dataset.view = view;
     const tpl = $("viewTemplates");
     if (tpl) tpl.hidden = view !== "templates";
+    const ap = $("viewAutopost");
+    if (ap) ap.hidden = view !== "autopost";
     const lg = $("viewLogs");
     if (lg) lg.hidden = view !== "logs";
   }
@@ -2808,6 +2981,7 @@
     if (o.render === false) return;
     if (view === "archive") loadArchives(o.page || state.archPage || 1);
     else if (view === "templates") renderTemplates();
+    else if (view === "autopost") { apFill(); apRefresh(); }
     else if (view === "logs") {
       fetchGlobalLogs();
       const b = $("globalLogBox");

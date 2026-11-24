@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>B站投稿台</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23fb7299'/%3E%3Cpath d='M9 10.5v11a1 1 0 0 0 1.5.86l9-5.5a1 1 0 0 0 0-1.72l-9-5.5A1 1 0 0 0 9 10.5z' fill='%23fff'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=111">
+<link rel="stylesheet" href="/static/style.css?v=114">
 </head>
 <body>
 
@@ -33,6 +33,9 @@
     <button class="rail-item" data-view="templates" type="button">
       <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 9v12"/></svg>
       <span>模板</span></button>
+    <button class="rail-item" data-view="autopost" type="button">
+      <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5L12 11l2.5 2.5"/></svg>
+      <span>自动投稿</span></button>
     <div class="rail-label">系统</div>
     <button class="rail-item" data-view="logs" type="button">
       <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 4h16v16H4z"/><path d="M4 13h5l1.5 3h3L15 13h5"/></svg>
@@ -318,6 +321,44 @@
     </div>
   </section>
 
+  <!-- ================= 录播自动投稿（独立视图，v113 从设置抽屉迁出） ================= -->
+  <section class="view-autopost" id="viewAutopost" hidden>
+    <div class="card ap-card">
+      <div class="card-head">
+        <div class="card-title">监视规则</div>
+        <div class="head-actions">
+          <button class="ghost-btn" id="apScan" type="button">立即扫描</button>
+          <button class="primary-btn" id="apSave" type="button">保存设置</button>
+        </div>
+      </div>
+      <div class="ap-body">
+        <label class="checkline">
+          <input type="checkbox" id="apEnable">
+          <span>启用自动投稿 <span class="counter">监视目录里录制完成的视频自动入队，投成功后原件移入「已投稿」</span></span>
+        </label>
+        <div class="field-row">
+          <div class="field">
+            <label class="label" for="apScanSecs">扫描间隔（秒）</label>
+            <input class="input" type="number" id="apScanSecs" min="10" max="600" step="5" value="30">
+          </div>
+          <div class="field" style="display:flex;align-items:flex-end;">
+            <button class="ghost-btn" id="apAddRule" type="button" style="width:100%;">+ 添加规则</button>
+          </div>
+        </div>
+        <div id="apRules"></div>
+      </div>
+    </div>
+    <div class="card ap-card">
+      <div class="card-head"><div class="card-title">运行状态</div></div>
+      <div class="ap-body">
+        <div class="kv"><span class="k">状态</span><span class="v" id="apStatus">未启用</span></div>
+        <div class="hint" id="apPending" style="margin:6px 0 0;"></div>
+        <div class="hint" id="apRecent" style="margin:6px 0 0;"></div>
+        <div class="hint" style="margin:10px 0 0;">还在录制的文件（大小/修改时间仍在变、读不出时长）绝不会上传；入队后源文件若被续写或改动，上传前会复核签名并退回重新判定。投稿成功后原件移入监视目录下「已投稿」子文件夹；失败/取消的原件留在原地，可在队列里重试。删除任务=放弃该稿，文件不会被自动投回。</div>
+      </div>
+    </div>
+  </section>
+
   <!-- ================= 运行日志（独立视图） ================= -->
   <section class="view-logs" id="viewLogs" hidden>
     <div class="card log-card">
@@ -597,6 +638,6 @@
 
 <div class="toast-wrap" id="toastWrap"></div>
 
-<script src="/static/app.js?v=111"></script>
+<script src="/static/app.js?v=114"></script>
 </body>
 </html>

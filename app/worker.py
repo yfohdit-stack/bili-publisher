@@ -1170,17 +1170,32 @@ def _summary(task: Dict[str, Any], text: str, level: str = "info",
 
 
 def _cleanup_files(task: Dict[str, Any]) -> int:
-    """删掉任务上传时落盘的视频文件（不动封面等衍生文件）。"""
+    """删掉任务上传时落盘的视频文件（不动封面等衍生文件）。
+
+    v112 路径护栏：只删程序 uploads 目录里的副本。自动投稿任务直接引用
+    监视目录里的原件，「上传后删除」绝不能把用户的录播原件删掉。
+    """
     removed = 0
     dirs = set()
+    uploads_root = os.path.realpath(os.path.join(store.DATA_DIR, "uploads"))
     for f in task.get("files") or []:
         path = f.get("path") or ""
         if not path:
             continue
-        dirs.add(os.path.dirname(path))
+        real = os.path.realpath(path)
         try:
-            if os.path.isfile(path):
-                os.remove(path)
+            inside = os.path.commonpath([real, uploads_root]) == uploads_root
+        except ValueError:
+            # v113：Windows 跨盘符（录播在 D:\、程序在 C:\）commonpath 直接抛
+            # ValueError。不同盘必然不在 uploads 里，按「目录外」跳过，绝不能
+            # 让异常冒泡把已投成功的稿件打成失败。
+            inside = False
+        if not inside:
+            continue    # 程序目录之外的文件（录播原件等）一律不碰
+        dirs.add(os.path.dirname(real))
+        try:
+            if os.path.isfile(real):
+                os.remove(real)
                 removed += 1
         except OSError:
             pass
@@ -1195,6 +1210,41 @@ def _cleanup_files(task: Dict[str, Any]) -> int:
 
 def _delete_after() -> str:
     return str(store.load_config().get("delete_after") or "off").lower()
+
+
+def _autopost_sources_ok(tid: str, task: Dict[str, Any]) -> bool:
+    """v113：自动投稿任务上传前复核源文件签名（入队时的 size+mtime）。
+
+    零拷贝引用原件，入队到真正上传之间可能隔几十分钟（排队/额度暂停/夜间），
+    录播软件续写、用户移动/删除都会让文件变样。不一致绝不硬传：
+    - 文件没了 → 判失败（原件都没了，重试也没意义）；
+    - 签名变了 → 退回 queued 标「源文件已变化，等待重新判定」，由 autopost
+      扫描重新走静默期判定，录完后原地更新签名继续投，不产生重复任务。
+    """
+    if not task.get("autopost_meta"):
+        return True
+    changed = False
+    for f in task.get("files") or []:
+        path = f.get("path") or ""
+        try:
+            st = os.stat(path)
+        except OSError:
+            store.update_task(tid, status="failed", finished_at=time.time(), speed=0,
+                              stage="", error="source_missing",
+                              message="源文件已被删除或移动，无法投稿；如仍需投稿请重新添加")
+            _log(tid, "源文件已被删除或移动，任务判失败", "error")
+            _summary(task, "源文件已被删除或移动，自动投稿任务判失败", "error")
+            return False
+        if f.get("src_size") is not None and int(st.st_size) != int(f["src_size"]):
+            changed = True
+        if f.get("src_mtime") is not None and abs(st.st_mtime - float(f["src_mtime"])) >= 1.0:
+            changed = True
+    if changed:
+        store.update_task(tid, status="queued", speed=0, stage="",
+                          message="源文件已变化，等待重新判定（录制完成后自动继续）")
+        _log(tid, "源文件与入队时签名不一致，退回队列等自动投稿重新判定", "warn")
+        return False
+    return True
 
 
 def _cleanup_approved() -> None:
@@ -1336,6 +1386,9 @@ def _handle(task: Dict[str, Any]) -> float:
     reserved = {"on": False}
 
     try:
+        # 1.5 v113：自动投稿先复核源文件签名，变了就退回等重新判定，不硬传
+        if not _autopost_sources_ok(tid, task):
+            return 30.0
         # 2. 10 分钟窗口节流：只针对本任务所属账号，窗口腾不下就把该账号
         #    登记为「暂时跳过」，返回 0 让主循环立刻去取别的账号的任务。
         pages = max(1, len(task.get("files") or []))
@@ -1511,6 +1564,15 @@ def _handle(task: Dict[str, Any]) -> float:
         elif mode == "approved":
             store.update_task(tid, cleanup="pending")
             _log(tid, "已按设置标记：通过审核后删除原文件", "info")
+
+        # v112 自动投稿：投成功后把监视目录里的原件移入「已投稿」子文件夹。
+        # 归档失败只记日志，绝不影响已成功的投稿结果。
+        if task.get("autopost_meta"):
+            try:
+                from . import autopost
+                autopost.archive_originals(task)
+            except Exception as e:  # noqa: BLE001
+                _log(tid, f"原件归档失败（留在原地）：{type(e).__name__}: {e}", "warn")
 
         # 投稿成功后挂合集：只有拿到 aid 才能挂，失败也只记日志，不影响投稿结果。
         # 合集挂载要等B站把新稿入库（实测 30 秒上下），放在主循环里会直接把队列卡住，
