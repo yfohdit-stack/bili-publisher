@@ -13,6 +13,38 @@
 
   const $ = (id) => document.getElementById(id);
 
+  // datetime-local 只认本地时间字符串。定时只能指向未来：
+  // min 取「下一分钟整」，既挡住日历里已经过去的日子，也避免选中即将到点的时刻。
+  function toLocalInputValue(ts) {
+    const d = new Date(ts);
+    const p = (n) => String(n).padStart(2, "0");
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) +
+      "T" + p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+
+  function nextMinuteTs() {
+    const d = new Date();
+    d.setSeconds(0, 0);
+    d.setMinutes(d.getMinutes() + 1);
+    return d.getTime();
+  }
+
+  function syncPublishAtMin() {
+    const el = $("publishAt");
+    if (!el) return;
+    el.min = toLocalInputValue(nextMinuteTs());
+  }
+
+  // 选中的时刻是否合法（必须晚于当前时间）
+  function publishAtError() {
+    const el = $("publishAt");
+    if (!el || !el.value) return "";
+    const at = new Date(el.value).getTime();
+    if (!Number.isFinite(at)) return "定时发布时间格式不正确，请重新选择";
+    if (at <= Date.now()) return "定时发布时间必须晚于当前时间，请重新选择";
+    return "";
+  }
+
   const PAGE_SIZE = 10;
 
   const state = {
@@ -54,6 +86,8 @@
     seasons: [],
     seasonsLoaded: false,
     seasonsError: "",
+    // 合集属于账号：按账号 id 记住上次选的合集，切回来时自动恢复
+    seasonByAccount: {},
     topic: { id: 0, name: "", mission: 0 },
     pollTimer: null,
     _lastSig: "",
@@ -239,20 +273,23 @@
 
   // 合集列表，登录后才拉得到；失败不打扰用户，只把提示写在旁边
   /* ---------------------------------------------------------- 话题 */
-  function setTopic(t) {
+  function setTopic(t, opts) {
     state.topic = { id: Number(t.id) || 0, name: t.name || "", mission: Number(t.mission_id) || 0 };
     const chip = $("topicChip");
-    if (!chip) return;
-    if (state.topic.id) {
-      chip.hidden = false;
-      $("topicChipText").textContent = "# " + state.topic.name;
-      $("topicInput").value = "";
-      $("topicHint").textContent = "已选话题 " + state.topic.id +
-        (state.topic.mission ? "，参与活动 " + state.topic.mission : "");
-    } else {
-      chip.hidden = true;
-      $("topicHint").textContent = "可选，输入后点搜索";
+    if (chip) {
+      if (state.topic.id) {
+        chip.hidden = false;
+        $("topicChipText").textContent = "# " + state.topic.name;
+        $("topicInput").value = "";
+        $("topicHint").textContent = "已选话题 " + state.topic.id +
+          (state.topic.mission ? "，参与活动 " + state.topic.mission : "");
+      } else {
+        chip.hidden = true;
+        $("topicHint").textContent = "可选，输入后点搜索";
+      }
     }
+    // 套用模板时由模板写入，不算手动改动；用户自己选/清话题才算脱离模板
+    if (!(opts && opts.fromTemplate)) markTemplateDirty();
     updateAdvCount();
   }
 
@@ -356,16 +393,63 @@
     }
   }
 
+  // 合集属于账号，ID 不能跨账号使用。这里按「当前生效账号」记录选择：
+  // - 用户选了哪个合集 → 记在哪个账号名下（ID + 标题）；
+  // - 切回原账号 → 直接恢复原 ID；换成同名合集的另一个账号 → 按标题自动匹配；
+  // - 都匹配不上才回到「不加入合集」，并明确提示，不会静默清空。
+  function rememberSeason(value) {
+    const key = state.activeAccount || "";
+    if (!key) return;
+    const n = Number(value) || 0;
+    if (n <= 0) { delete state.seasonByAccount[key]; return; }
+    const hit = (state.seasons || []).find((s) => Number(s.id) === n);
+    const old = state.seasonByAccount[key];
+    state.seasonByAccount[key] = {
+      id: n,
+      title: (hit && hit.title) || (old && Number(old.id) === n ? old.title : "") || "",
+    };
+  }
+
+  function seasonExists(id) {
+    return !!id && (state.seasons || []).some((s) => Number(s.id) === Number(id));
+  }
+
+  function seasonByTitle(title) {
+    const want = String(title || "").trim();
+    if (!want) return 0;
+    const hit = (state.seasons || []).find((s) => String(s.title || "").trim() === want);
+    return hit ? Number(hit.id) || 0 : 0;
+  }
+
   function renderSeasons() {
     const sel = $("seasonSelect");
     const hint = $("seasonHint");
     if (!sel) return;
-    const keep = Number(sel.value) || 0;
+    const keep = Number(sel.value) || 0;          // 当前下拉里的选择（可能属于上一个账号）
+    const mem = state.seasonByAccount[state.activeAccount] || null;
     sel.innerHTML = '<option value="0">不加入合集</option>' +
       '<option value="new">＋ 新建合集…</option>' +
       state.seasons.map((s) => '<option value="' + s.id + '">' +
         esc(s.title || ("合集 " + s.id)) + "（" + s.count + " 个）</option>").join("");
-    if (keep && state.seasons.some((s) => s.id === keep)) sel.value = String(keep);
+    // 优先保留当前选择；不属于本账号时用本账号上次的选择（ID → 同名标题）
+    let target = 0;
+    let byTitle = false;
+    if (keep > 0 && seasonExists(keep)) target = keep;
+    else if (mem) {
+      if (seasonExists(mem.id)) target = Number(mem.id);
+      else if (mem.title) {
+        const hit = seasonByTitle(mem.title);
+        if (hit) { target = hit; byTitle = true; }
+      }
+    }
+    sel.value = target ? String(target) : "0";
+    if (target) {
+      rememberSeason(target);
+      if (byTitle) toast("已按同名匹配到本账号的合集「" + (mem.title || "") + "」", "info", 3800);
+    } else if (!state.seasonsError && mem && !seasonExists(mem.id) && !seasonByTitle(mem.title)) {
+      // 合集在B站被删了、本账号也没有同名的：清掉记忆，免得每次都选一个不存在的
+      rememberSeason(0);
+    }
     if (hint) {
       if (state.seasons.length) hint.textContent = state.seasons.length + " 个可选";
       else hint.textContent = state.seasonsError ? "读取失败，点重试" : "账号下暂无合集";
@@ -385,7 +469,6 @@
     }
     if (d.copyright) $("copyrightSelect").value = String(d.copyright);
     syncCopyright();
-    if (state.config && state.config.channel && $("channelSelect")) $("channelSelect").value = state.config.channel;
   }
 
   // 前台基准 2.2 秒；空闲且无变化时按阶梯退避，页面切后台统一 10 秒
@@ -1346,6 +1429,16 @@
   }
 
   /* ---------------------------------------------------------- 模板 */
+  /* 「套用模板」下拉是「当前表单 = 某模板」的标记。
+     手动改动模板覆盖的投稿设置后，必须回到（无），不能继续显示原模板名，
+     否则用户会以为改动只是微调、实际已经被模板绑定住了。 */
+  function markTemplateDirty() {
+    if (state.editTpl) return;      // 模板编辑态：改动本来就是要覆盖原模板
+    const sel = $("tplSelect");
+    if (sel && sel.value) sel.value = "";
+    updateAdvCount();
+  }
+
   function renderTemplates() {
     const sel = $("tplSelect");
     const cur = sel.value;
@@ -1380,15 +1473,18 @@
     if (Array.isArray(p.tags)) { state.tags = p.tags.slice(0, 10); renderTags(); }
     if (p.tid) $("tidSelect").value = String(p.tid);
     if (p.copyright) $("copyrightSelect").value = String(p.copyright);
+    if ($("noReprint")) $("noReprint").checked = !!p.no_reprint;
     syncCopyright();
-    if (p.channel && $("channelSelect")) $("channelSelect").value = p.channel;
     // 编辑态只是把参数载进来改，别顺手在账号下建合集
     if (p.season_id != null && $("seasonSelect")) {
       await applyTemplateSeason(p, { allowCreate: !opts.forEdit });
+      // 模板带过来的合集同样算「本账号的选择」，切账号再回来要能恢复
+      rememberSeason($("seasonSelect").value);
     }
     if ($("noPush")) $("noPush").checked = !!p.no_disturbance;
     if ($("onlySelf")) $("onlySelf").checked = !!p.is_only_self;
-    if (p.topic_id) setTopic({ id: p.topic_id, name: p.topic_name || "", mission_id: p.mission_id });
+    if (p.topic_id) setTopic({ id: p.topic_id, name: p.topic_name || "", mission_id: p.mission_id },
+                             { fromTemplate: true });
     updateCounters();
     if (opts.forEdit) {
       setTplEdit(t);
@@ -1396,6 +1492,9 @@
       return;
     }
     if (state.editTpl) setTplEdit(null);
+    // 从模板页「套用」进来时下拉还停在上一次的值：这里显式对齐，避免显示错模板
+    if ($("tplSelect")) $("tplSelect").value = String(t.id);
+    updateAdvCount();
     toast("已套用模板：" + t.name, "ok");
   }
 
@@ -1440,7 +1539,8 @@
       tags: state.tags,
       tid: Number($("tidSelect").value),
       copyright: Number($("copyrightSelect").value),
-      channel: "",
+      // 禁止转载也是投稿设置的一部分，跟其余勾选项一起存进模板
+      no_reprint: $("noReprint") && $("noReprint").checked ? 1 : 0,
       // 合集除了 ID 还要存名字：换账号套用时靠它找同名合集
       season_id: tplSeasonId(),
       season_title: tplSeasonTitle(),
@@ -1660,27 +1760,61 @@
   }
 
   async function switchAccount(id) {
+    // 合集属于账号：先把当前选择（ID + 标题）记到旧账号名下，切回来/同名可自动恢复
+    const prevSeason = $("seasonSelect") ? (Number($("seasonSelect").value) || 0) : 0;
+    const prevHit = (state.seasons || []).find((s) => Number(s.id) === prevSeason);
+    const prevTitle = (prevHit && prevHit.title) || "";
+    rememberSeason(prevSeason);
     try {
       const r = await api("/api/accounts/switch", { method: "POST", body: { id: id } });
       state.account = r.account;
       state.accounts = r.accounts || [];
+      state.activeAccount = r.active || id || "";
       if (r.quota) state.quota = r.quota;
       renderAccount(); renderAccounts(); renderQuota();
       // 概览数字属于账号：立刻作废并重取，避免还把上一个号的数字留在页面上
       refreshOverview("switch");
-      // 合集属于账号：切换后必须换成本账号的合集列表
+      // 合集属于账号：清掉下拉里的旧选择，再按新账号的记忆/同名合集重建
+      if ($("seasonSelect")) $("seasonSelect").value = "0";
       state.seasonsLoaded = false; state.seasonsError = "";
       await loadSeasons(true);
-      toast("已切换到：" + ((r.account && r.account.uname) || id), "ok");
+      let nowSeason = $("seasonSelect") ? (Number($("seasonSelect").value) || 0) : 0;
+      // 新账号没有原 ID 的合集时，按标题找同名（同一 UP 的多账号常常建同名合集）
+      if (!nowSeason && prevTitle) {
+        const hit = (state.seasons || []).find(
+          (s) => String(s.title || "").trim() === prevTitle.trim());
+        if (hit) {
+          $("seasonSelect").value = String(hit.id);
+          rememberSeason(hit.id);
+          nowSeason = Number(hit.id) || 0;
+        }
+      }
+      const who = (r.account && r.account.uname) || id;
+      if (prevSeason && nowSeason === prevSeason) {
+        toast("已切换到：" + who, "ok");
+      } else if (prevSeason && !nowSeason) {
+        toast("已切换到：" + who + "；原合集「" + (prevTitle || ("#" + prevSeason))
+          + "」在本账号没有同名合集，已改为「不加入合集」（切回原账号会自动恢复）", "info", 5200);
+      } else if (prevSeason) {
+        toast("已切换到：" + who + "；原合集在本账号已按同名匹配", "ok", 4400);
+      } else {
+        toast("已切换到：" + who, "ok");
+      }
     } catch (e) { toast("切换失败：" + e.message, "err"); }
   }
 
   async function removeAccount(id) {
     if (!confirm("确定删除这个账号？只删本地 cookie，不影响B站账号本身。")) return;
+    const prevActive = state.activeAccount;
+    rememberSeason($("seasonSelect") ? $("seasonSelect").value : 0);
     try {
       const r = await api("/api/accounts/remove", { method: "POST", body: { id: id } });
       state.accounts = r.accounts || [];
       if (r.account) state.account = r.account;
+      state.activeAccount = r.active || state.activeAccount || "";
+      delete state.seasonByAccount[id];       // 被删账号的合集记忆一起清掉
+      // 只有当前生效账号变了，下拉里的旧合集才需要作废；删别的账号不动当前选择
+      if (prevActive !== state.activeAccount && $("seasonSelect")) $("seasonSelect").value = "0";
       renderAccount(); renderAccounts();
       refreshOverview("remove");
       state.seasonsLoaded = false; state.seasonsError = "";
@@ -2061,7 +2195,6 @@
       tid: Number($("tidSelect").value) || 21,
       copyright: Number($("copyrightSelect").value) || 1,
       no_reprint: $("noReprint").checked,
-      channel: "",
       season_id: Number($("seasonSelect").value) || 0,
       no_disturbance: $("noPush") && $("noPush").checked ? 1 : 0,
       is_only_self: $("onlySelf") && $("onlySelf").checked ? 1 : 0,
@@ -2108,6 +2241,13 @@
       return;
     }
     if (!state.files.length) { toast("先选视频文件", "err"); return; }
+    const paErr = publishAtError();
+    if (paErr) {
+      toast(paErr, "err", 4200);
+      syncPublishAtMin();
+      $("publishAt").focus();
+      return;
+    }
 
     const bar = $("uploadBar");
     const fill = $("uploadFill");
@@ -2243,6 +2383,7 @@
     $("copyrightSelect").value = "1";
     $("noReprint").checked = false;
     if ($("seasonSelect")) $("seasonSelect").value = "0";
+    rememberSeason(0);      // 恢复默认也清掉本账号的合集记忆，下次切回来不再自动带上
     if ($("noPush")) $("noPush").checked = false;
     if ($("onlySelf")) $("onlySelf").checked = false;
     $("topicInput").value = "";
@@ -2416,9 +2557,18 @@
 
     // 创作类型：转载时禁用「禁止转载」
     if ($("copyrightSelect")) $("copyrightSelect").addEventListener("change", syncCopyright);
+    // 定时只能选未来：每次点开都按当前时间刷新下限
+    syncPublishAtMin();
+    $("publishAt").addEventListener("focus", syncPublishAtMin);
     // 选了定时时间才显示定时方式
     $("publishAt").addEventListener("input", () => {
       $("scheduleModeRow").hidden = !$("publishAt").value;
+    });
+    // 选完就校验一次，别等到点「加入队列」才发现时间已经过去
+    $("publishAt").addEventListener("change", () => {
+      const err = publishAtError();
+      if (!err) return;
+      toast(err + "（最早可选 " + ($("publishAt").min || "").replace("T", " ") + "）", "err", 4400);
     });
     // 模板
     $("tplSelect").addEventListener("change", async (e) => {
@@ -2437,6 +2587,7 @@
         await loadSeasons(true);
         const id = String((r.item && r.item.id) || "");
         if (id && Array.from(e.target.options).some((o) => o.value === id)) e.target.value = id;
+        rememberSeason(e.target.value);
         toast("已新建合集「" + name + "」", "ok", 3400);
       } catch (err) {
         toast("新建合集失败：" + err.message, "err", 4400);
@@ -2444,6 +2595,12 @@
       } finally {
         e.target.disabled = false;
       }
+    });
+    // 记住本账号选中的合集：切账号再切回来、刷新列表后都能自动恢复
+    $("seasonSelect").addEventListener("change", () => {
+      const v = $("seasonSelect").value;
+      if (v === "new") return;      // 新建过程由上面的逻辑在成功后记录
+      rememberSeason(v);
     });
 
     $("btnSaveTpl").addEventListener("click", async () => {
@@ -2707,8 +2864,12 @@
     ["seasonSelect", "tplSelect", "copyrightSelect", "noReprint", "noPush", "onlySelf"]
       .forEach((id) => {
         const el = $(id);
-        if (el) el.addEventListener("change", updateAdvCount);
+        if (!el) return;
+        el.addEventListener("change", updateAdvCount);
+        // 手动改了模板覆盖的投稿设置 → 「套用模板」下拉回到（无），不能再显示原模板
+        if (id !== "tplSelect") el.addEventListener("change", markTemplateDirty);
       });
+    if ($("tidSelect")) $("tidSelect").addEventListener("change", markTemplateDirty);
     updateAdvCount();
 
     // 队列状态筛选：顶部统计胶囊（状态下拉已移除，避免与胶囊重复）

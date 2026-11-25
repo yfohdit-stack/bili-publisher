@@ -30,7 +30,7 @@ WEB_DIR = os.path.join(BASE_DIR, "web")
 UPLOAD_DIR = os.path.join(store.DATA_DIR, "uploads")
 COVER_DIR = os.path.join(store.DATA_DIR, "covers")
 
-APP_VERSION = "v114"
+APP_VERSION = "v117"
 
 app = Flask(__name__, static_folder=WEB_DIR, static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = None  # 视频文件大，不限制
@@ -302,12 +302,8 @@ def _public_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(wa, dict):
         wa = {}
     # web_auth 里的 token / 密码绝不能明文下发（即使页面本身已鉴权）。
-    # v105：历史 config.json 里可能还留着 biliup_* 键，一律不再下发；
-    # channel 也强制成 official，免得前端读到过期的 "biliup"。
     out: Dict[str, Any] = {k: v for k, v in cfg.items()
-                           if k not in ("cookie", "web_auth")
-                           and not k.startswith("biliup_")}
-    out["channel"] = "official"
+                           if k not in ("cookie", "web_auth")}
     out.update({
         "quota_limit": cfg.get("quota_limit") or 50,
         "quota_hours": cfg.get("quota_hours") or 24,
@@ -570,7 +566,6 @@ def _public_task(t: Dict[str, Any]) -> Dict[str, Any]:
         "status": t.get("status"),
         "stage": t.get("stage") or "",
         "progress": round(float(t.get("progress") or 0), 4),
-        "channel": t.get("channel"),
         "season_id": t.get("season_id") or 0,
         "topic_id": t.get("topic_id") or 0,
         "topic_name": t.get("topic_name") or "",
@@ -651,7 +646,7 @@ def bootstrap():
 def set_config():
     body = request.get_json(force=True, silent=True) or {}
     patch: Dict[str, Any] = {}
-    for k in ("channel", "quota_limit", "quota_hours", "max_attempts",
+    for k in ("quota_limit", "quota_hours", "max_attempts",
               "upload_line", "delete_after",
               "quota_strict", "max_file_mb", "max_parts",
               "overdue_guard", "overdue_minutes", "auto_resume", "notify"):
@@ -1068,6 +1063,17 @@ def publish():
         # B站要求至少一个标签，没填就用分区名兜底
         task_tags = [next((n.split("/")[-1] for t, n in partitions.load(cfg) if t == task_tid), "日常")]
 
+    # 定时发布只能指向未来：过去的时刻交上去，任务会立刻按「已到点」处理，
+    # 既不是用户想要的定时，也会让本地候着/B站定时两条路都失真。
+    publish_at_ts = None
+    if meta.get("publish_at"):
+        try:
+            publish_at_ts = float(meta["publish_at"])
+        except (TypeError, ValueError):
+            raise UploadRejected("定时发布时间不是合法的秒级时间戳")
+        if publish_at_ts <= time.time():
+            raise UploadRejected("定时发布时间必须晚于当前时间，请重新选择")
+
     created: List[Dict[str, Any]] = []
 
     def build_files(files, task_id: str, titles: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1112,7 +1118,6 @@ def publish():
         "copyright": int(meta.get("copyright") or defaults.get("copyright") or 1),
         "no_reprint": bool(meta.get("no_reprint", defaults.get("no_reprint"))),
         "dynamic": meta.get("dynamic") or "",
-        "channel": meta.get("channel") or cfg.get("channel") or "auto",
         "season_id": int(meta.get("season_id") or defaults.get("season_id") or 0),
         "topic_id": int(meta.get("topic_id") or defaults.get("topic_id") or 0),
         "topic_name": meta.get("topic_name") or defaults.get("topic_name") or "",
@@ -1120,7 +1125,7 @@ def publish():
         "no_disturbance": 1 if meta.get("no_disturbance") else 0,
         "is_only_self": 1 if meta.get("is_only_self") else 0,
         "max_attempts": int(meta.get("max_attempts") or cfg.get("max_attempts") or 2),
-        "publish_at": float(meta["publish_at"]) if meta.get("publish_at") else None,
+        "publish_at": publish_at_ts,
         # local=程序本地候着到点自动上传；bili=交给B站定时队列（默认，兼容旧行为）
         "schedule_mode": (meta.get("schedule_mode") or "bili") if meta.get("publish_at") else "bili",
         # 多账号：默认用当前生效账号；前端可显式传 account_id 给某个账号投
@@ -1269,13 +1274,23 @@ def task_action(task_id: str):
     elif action == "update":
         worker.clear_cancel(task_id)
         fields = {}
-        for k in ("title", "desc", "dynamic", "tid", "copyright", "no_reprint", "channel"):
+        for k in ("title", "desc", "dynamic", "tid", "copyright", "no_reprint"):
             if k in body:
                 fields[k] = body[k]
         if "tags" in body:
             fields["tags"] = body["tags"]
         if "publish_at" in body:
-            fields["publish_at"] = float(body["publish_at"]) if body["publish_at"] else None
+            # 与投稿入口同一条规则：定时只能改到未来，改到过去等于立刻发
+            if body["publish_at"]:
+                try:
+                    pa = float(body["publish_at"])
+                except (TypeError, ValueError):
+                    return jsonify({"ok": False, "error": "定时发布时间不是合法的秒级时间戳"}), 400
+                if pa <= time.time():
+                    return jsonify({"ok": False, "error": "定时发布时间必须晚于当前时间，请重新选择"}), 400
+                fields["publish_at"] = pa
+            else:
+                fields["publish_at"] = None
             fields["status"] = "queued"
             fields["message"] = ""
         if fields:

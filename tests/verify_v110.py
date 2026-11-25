@@ -62,7 +62,7 @@ def new_task(title="坏封面"):
     open(cover, "wb").write(b"\xff\xd8\xff\xd9")
     return store.create_task({"title": title, "cover_path": cover,
                               "files": [{"path": os.path.join(TMP, "a.mp4"), "size": 1}],
-                              "channel": "official", "max_attempts": 2, "attempts": 0})
+                              "max_attempts": 2, "attempts": 0})
 
 
 worker._stop.wait = lambda *_: None

@@ -43,7 +43,7 @@ worker._notify = lambda event, title, text, level="info": PUSHED.append(
 
 
 def new_task(**kw):
-    payload = {"title": "测试稿", "files": [], "channel": "official"}
+    payload = {"title": "测试稿", "files": []}
     payload.update(kw)
     return store.create_task(payload)
 

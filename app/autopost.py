@@ -514,7 +514,6 @@ def _ingest_chunk(chunk: List[Dict[str, Any]], infos: Dict[str, Dict[str, Any]],
             "no_reprint": p.get("no_reprint", defaults.get("no_reprint", False)),
             "dynamic": p.get("dynamic") or defaults.get("dynamic") or "",
             "cover_path": "",            # 无封面时 worker 自动截帧兜底
-            "channel": "official",
             "season_id": season_id,
             "topic_id": int(p.get("topic_id") or 0),
             "topic_name": p.get("topic_name") or "",

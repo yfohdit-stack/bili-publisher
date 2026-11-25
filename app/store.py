@@ -39,8 +39,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "accounts": [],
     "active_account": "",
     "legacy_account_backfill": False,
-    # v105：移除 biliup 通道，上传固定走内置官方接口
-    "channel": "official",
     # 24 小时投稿数上限，超过即拦截
     "quota_limit": 50,
     "quota_hours": 24,
@@ -82,6 +80,20 @@ def _merge(base: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _purge_legacy(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """清掉旧版配置里残留的上传通道键。
+
+    早期版本把上传通道（含外部 CLI 的一整套参数）直接写进 config.json，
+    后来固定只走内置官方接口。这里在加载时把这类键从磁盘配置里删掉，
+    而不是每次下发前过滤，避免老键一直躺在配置里被其它模块读到。
+    返回新对象表示有改动需要落盘。
+    """
+    stale = [k for k in cfg if k.startswith("biliup_") or k == "channel"]
+    if not stale:
+        return None
+    return {k: v for k, v in cfg.items() if k not in stale}
+
+
 def ensure_dirs() -> None:
     global _dirs_ready_for
     if _dirs_ready_for != DATA_DIR:
@@ -118,8 +130,12 @@ def load_config() -> Dict[str, Any]:
         except Exception:
             raw = {}
         cfg = _merge(DEFAULT_CONFIG, raw)
+        purged = _purge_legacy(cfg)
+        if purged is not None:
+            cfg = purged
         migrated = _migrate_accounts(cfg)
-        if migrated is not cfg:      # 旧配置升级：把单账号登记进 accounts 并落盘
+        if migrated is not cfg or purged is not None:
+            # 旧配置升级：清掉残留通道键 / 把单账号登记进 accounts，并落盘
             return save_config(migrated)
         return _cache_put(migrated)
 
@@ -127,6 +143,7 @@ def load_config() -> Dict[str, Any]:
 def save_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     ensure_dirs()
     cfg = _merge(DEFAULT_CONFIG, cfg)
+    cfg = _purge_legacy(cfg) or cfg
     with _lock:
         tmp = CONFIG_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -390,7 +407,6 @@ CREATE TABLE IF NOT EXISTS tasks (
     dynamic      TEXT DEFAULT '',
     cover_path   TEXT DEFAULT '',
     publish_at   REAL,
-    channel      TEXT DEFAULT 'auto',
     season_id    INTEGER DEFAULT 0,
     topic_id     INTEGER DEFAULT 0,
     topic_name   TEXT DEFAULT '',
@@ -472,6 +488,14 @@ def init_db() -> None:
             conn.execute("ALTER TABLE tasks ADD COLUMN cover_hits INTEGER DEFAULT 0")
         if "autopost_meta" not in cols:
             conn.execute("ALTER TABLE tasks ADD COLUMN autopost_meta TEXT DEFAULT ''")
+        # 老库删字段：早期版本给每个任务存过上传通道，现在固定单一通道，
+        # 这一列已无任何代码读取。SQLite 3.35+ 才支持 DROP COLUMN，失败就留着
+        # （不占用逻辑，读表时也无人再用），不影响任何功能。
+        if "channel" in cols:
+            try:
+                conn.execute("ALTER TABLE tasks DROP COLUMN channel")
+            except sqlite3.Error:
+                pass
         conn.commit()
         _backfill_legacy_accounts(conn)
 
@@ -499,7 +523,7 @@ def _backfill_legacy_accounts(conn: sqlite3.Connection) -> None:
 TASK_FIELDS = (
     "id", "created_at", "updated_at", "finished_at", "status", "stage", "progress",
     "title", "desc", "tags", "tid", "copyright", "no_reprint", "dynamic",
-    "cover_path", "publish_at", "channel", "season_id", "topic_id", "topic_name", "mission_id", "no_disturbance",
+    "cover_path", "publish_at", "season_id", "topic_id", "topic_name", "mission_id", "no_disturbance",
     "is_only_self", "speed", "cleanup", "schedule_mode", "account_id",
     "files", "bvid", "aid",
     "attempts", "max_attempts", "error", "message", "quota_info", "cover_rev",
@@ -540,7 +564,6 @@ def _build_task(payload: Dict[str, Any]) -> Dict[str, Any]:
         "dynamic": payload.get("dynamic") or "",
         "cover_path": payload.get("cover_path") or "",
         "publish_at": payload.get("publish_at"),
-        "channel": payload.get("channel") or "auto",
         "season_id": int(payload.get("season_id") or 0),
         "topic_id": int(payload.get("topic_id") or 0),
         "topic_name": (payload.get("topic_name") or ""),

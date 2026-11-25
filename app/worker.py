@@ -1122,15 +1122,6 @@ def _notify(event: str, title: str, text: str, level: str = "info") -> None:
         pass
 
 
-def _choose_channel(task: Dict[str, Any], cfg: Dict[str, Any],
-                    log: Callable[[str, str], None]) -> str:
-    """v105 起上传固定走内置官方接口：biliup 通道与实体校验已整体移除。
-
-    保留函数壳是为了兼容现有调用点与回归测试（测试仍断言返回 official）。
-    """
-    return "official"
-
-
 def _notify_send(cfg: Dict[str, Any], event: str, title: str,
                  text: str, level: str) -> None:
     """后台线程：真正发一次；失败只做节流式记日志，绝不抛到队列主循环。"""
@@ -1485,10 +1476,9 @@ def _handle(task: Dict[str, Any]) -> float:
             _summary(task, "投稿失败：没有可用封面", "error")
             return 0.0
 
-        # 5. 选通道
+        # 5. 固定使用内置官方接口上传
         # 多账号：任务绑定的账号优先，没绑定就用当前生效账号
         cfg = store.account_cfg(task.get("account_id"))
-        channel = _choose_channel(task, cfg, lambda m, lv="info": _log(tid, m, lv))
 
         # 5.1 先占额度：从这一刻起这篇稿就算进 24h 额度，不等上传结束、更不等B站入库。
         #     B站创作者中心对刚提交的稿件有 1~3 分钟入库延迟，配额把关却发生在
@@ -1503,7 +1493,7 @@ def _handle(task: Dict[str, Any]) -> float:
         store.update_task(tid, status="uploading", attempts=int(task.get("attempts") or 0) + 1,
                           stage="准备上传", progress=0.01)
         _ensure_watchdog()
-        _log(tid, "使用通道：官方接口")
+        _log(tid, "使用内置官方接口上传")
 
         def log_fn(msg: str) -> None:
             _log(tid, msg)

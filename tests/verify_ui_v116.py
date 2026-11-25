@@ -1,6 +1,6 @@
-"""v105 UI 校验：确认 biliup 设置项已彻底消失、页面无 JS 报错、设置可正常保存。
+"""v116 UI 校验：历史上传通道（biliup / channel）已彻底消失，页面无 JS 报错、设置可正常保存。
 
-用法：python3 tests/verify_ui_v105.py [base_url]
+用法：python3 tests/verify_ui_v116.py [base_url]
 默认 http://127.0.0.1:5277，需要 5277 已在跑。
 """
 import sys
@@ -28,23 +28,32 @@ def api(path: str) -> dict:
         return json.loads(r.read().decode("utf-8"))
 
 
+def legacy_keys(cfg: dict) -> list:
+    return [k for k in (cfg or {}) if k.startswith("biliup_") or k == "channel"]
+
+
 def main() -> int:
-    print("\n=== A. 前端资源里已无 biliup ===")
+    bs = api("/api/bootstrap")
+    ver = str(bs.get("version") or "")
+    num = ver.lstrip("v")
+
+    print("\n=== A. 前端资源里已无历史通道字样 ===")
     for f in ("index.html", "app.js", "style.css"):
         body = urllib.request.urlopen(f"{BASE}/static/{f}", timeout=20).read().decode("utf-8", "ignore")
         chk(f"{f} 不含 biliup", "biliup" not in body.lower(), "")
-    chk("index.html 版本号 v105", "?v=105" in urllib.request.urlopen(f"{BASE}/static/index.html", timeout=20).read().decode("utf-8", "ignore"))
+    html = urllib.request.urlopen(f"{BASE}/static/index.html", timeout=20).read().decode("utf-8", "ignore")
+    chk("index.html 静态资源版本号与 APP_VERSION 同步", f"?v={num}" in html, ver)
 
-    print("\n=== B. bootstrap 只下发官方通道 ===")
-    bs = api("/api/bootstrap")
-    chk("version = v105", bs.get("version") == "v105", str(bs.get("version")))
+    print("\n=== B. bootstrap 只下发内置官方接口 ===")
+    chk("version 不低于 v115", int(num or 0) >= 115, ver)
     chk("env 无 biliup 键", "biliup" not in (bs.get("env") or {}), str(list((bs.get("env") or {}).keys())))
     chk("env 有 official / ffmpeg", {"official", "ffmpeg"} <= set((bs.get("env") or {}).keys()))
     cfg = bs.get("config") or {}
-    chk("config 无 biliup_* 键", not any(k.startswith("biliup_") for k in cfg), str([k for k in cfg if "biliup" in k]))
-    chk("config.channel = official", cfg.get("channel") == "official", str(cfg.get("channel")))
+    chk("config 无 biliup_* / channel 键", not legacy_keys(cfg), str(legacy_keys(cfg)))
+    chk("任务列表不含 channel 字段",
+        all("channel" not in t for t in (bs.get("tasks") or [])), "")
 
-    print("\n=== C. 设置面板已移除上传通道/biliup 控件 ===")
+    print("\n=== C. 页面无残留控件、无 JS 报错 ===")
     errors = []
     with sync_playwright() as p:
         b = p.chromium.launch(executable_path="/usr/local/bin/chromium", args=["--no-sandbox"])
@@ -54,7 +63,7 @@ def main() -> int:
         page.goto(BASE, wait_until="domcontentloaded")
         page.wait_for_timeout(3000)
 
-        for eid in ("cfgChannel", "cfgBiliupBin", "cfgBiliupLine", "cfgBiliupCookie",
+        for eid in ("cfgChannel", "channelSelect", "cfgBiliupBin", "cfgBiliupLine", "cfgBiliupCookie",
                     "cfgBiliupCookieAccount", "biliupIdentityHint", "envBiliup"):
             el = page.evaluate("id => !!document.getElementById(id)", eid)
             chk(f"#{eid} 已不存在", el is False, f"仍有 {eid}")
@@ -74,10 +83,9 @@ def main() -> int:
         chk("保存全程无 JS 报错", not errors, str(errors[:3]))
         b.close()
 
-    print("\n=== D. 保存后配置仍无 biliup ===")
+    print("\n=== D. 保存后配置仍无历史通道键 ===")
     cfg2 = api("/api/bootstrap").get("config") or {}
-    chk("保存后 config 无 biliup_* 键", not any(k.startswith("biliup_") for k in cfg2), str([k for k in cfg2 if "biliup" in k]))
-    chk("保存后 channel = official", cfg2.get("channel") == "official", str(cfg2.get("channel")))
+    chk("保存后 config 无 biliup_* / channel 键", not legacy_keys(cfg2), str(legacy_keys(cfg2)))
     chk("保存后 upload_line 仍在", "upload_line" in cfg2, str(cfg2.get("upload_line")))
 
     print(f"\n===== 结果：{passed} 通过 / {failed} 失败 =====")

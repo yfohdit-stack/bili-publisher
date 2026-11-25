@@ -125,7 +125,7 @@ files = [{"path": os.path.join(TMP, f"p{i}.mp4"), "size": 1} for i in range(11)]
 cover = os.path.join(TMP, "cover.jpg")
 open(cover, "wb").write(b"\xff\xd8\xff\xd9")
 task = store.create_task({"title": "11P 连续投稿", "files": files,
-                          "cover_path": cover, "channel": "official", "max_attempts": 2,
+                          "cover_path": cover, "max_attempts": 2,
                           "attempts": 0})
 with mock.patch.object(worker, "_history", lambda now=None, account_id="": [NOW - 60] * 11), \
      mock.patch.object(worker.official, "publish") as pub:

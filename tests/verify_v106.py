@@ -48,7 +48,7 @@ def new_task(**kw):
     with open(cover, "wb") as f:
         f.write(b"\xff\xd8\xff\xd9")
     payload = {"title": "测试稿", "files": [{"path": os.path.join(TMP, "x.mp4"), "size": 1}],
-               "cover_path": cover, "channel": "official", "max_attempts": 2}
+               "cover_path": cover, "max_attempts": 2}
     payload.update(kw)
     return store.create_task(payload)
 
