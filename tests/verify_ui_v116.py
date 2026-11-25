@@ -35,7 +35,7 @@ def legacy_keys(cfg: dict) -> list:
 def main() -> int:
     bs = api("/api/bootstrap")
     ver = str(bs.get("version") or "")
-    num = ver.lstrip("v")
+    num = ver.lstrip("v").replace(".", "")
 
     print("\n=== A. 前端资源里已无历史通道字样 ===")
     for f in ("index.html", "app.js", "style.css"):

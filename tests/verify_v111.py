@@ -160,8 +160,8 @@ check("rate 暂停分支里没有「自动继续投稿」字样",
 server_py = open(os.path.join(BASE, "app", "server.py"), encoding="utf-8").read()
 html = open(os.path.join(BASE, "web", "index.html"), encoding="utf-8").read()
 ver = [ln.split('"')[1] for ln in server_py.splitlines() if "APP_VERSION =" in ln][0]
-check("静态资源 ?v= 与 APP_VERSION 同步", ("?v=" + ver.lstrip("v")) in html, ver)
-check("大版本不低于 v111", int(ver.lstrip("v")) >= 111, ver)
+check("静态资源 ?v= 与 APP_VERSION 同步", ("?v=" + ver.lstrip("v").replace(".", "")) in html, ver)
+check("大版本不低于 v111", int(ver.lstrip("v").split(".")[0]) >= 111, ver)
 
 print("\n" + "=" * 56)
 print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")

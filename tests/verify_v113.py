@@ -225,10 +225,10 @@ r = client.post("/api/autopost", json={"enabled": True, "rules": [
     {"name": "x", "watch_dir": W, "session_gap_secs": 3600}]})
 check("合法场次间隔保存 → 200", r.status_code == 200
       and r.get_json()["autopost"]["config"]["rules"][0]["session_gap_secs"] == 3600)
-check("APP_VERSION 不低于 v114", int(server.APP_VERSION.lstrip("v")) >= 114, server.APP_VERSION)
+check("APP_VERSION 不低于 v114", int(server.APP_VERSION.lstrip("v").split(".")[0]) >= 114, server.APP_VERSION)
 check("静态资源 ?v= 与 APP_VERSION 同步",
-      f"style.css?v={int(server.APP_VERSION.lstrip('v'))}" in html
-      and f"app.js?v={int(server.APP_VERSION.lstrip('v'))}" in html)
+      f"style.css?v={server.APP_VERSION.lstrip('v').replace('.', '')}" in html
+      and f"app.js?v={server.APP_VERSION.lstrip('v').replace('.', '')}" in html)
 
 print("\n" + "=" * 56)
 print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")

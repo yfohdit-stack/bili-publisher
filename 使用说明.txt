@@ -1,0 +1,21 @@
+B站投稿台 v107 —— 离线开箱即用版
+
+一、Linux / macOS
+  1) chmod +x 一键启动.sh
+  2) ./一键启动.sh --port 5277
+  3) 浏览器打开 http://127.0.0.1:5277/
+
+二、Windows
+  依赖包里的 wheel 是 Linux 平台的，Windows 请用 start.bat（会自动联网装依赖），
+  或直接：python -m venv .venv && .venv\Scripts\pip install -r requirements.txt && python run.py
+
+三、首次使用
+  - 打开页面 → 设置 → 用B站APP扫码登录（或粘贴 SESSDATA/bili_jct/buvid3/DedeUserID）
+  - 设置里可以把「上传线路（CDN）」按所在地选择：国内 bda2 / 海外 txa
+  - data/config.json 会在首次启动自动生成，cookie 写在这里
+
+四、包含内容
+  app/       后端（Flask + 官方接口上传 + 队列/限流/额度/编辑）
+  web/       前端页面
+  vendor/    离线依赖 wheel（33MB，Linux x86_64 + Python 3.12）
+  run.py     启动入口

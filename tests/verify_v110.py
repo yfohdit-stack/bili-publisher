@@ -161,8 +161,8 @@ app_js = open(os.path.join(BASE, "web", "app.js"), encoding="utf-8").read()
 html = open(os.path.join(BASE, "web", "index.html"), encoding="utf-8").read()
 check("横幅里说明了 3 次的出口", "连续 3 次被拒会自动判失败" in app_js)
 ver = [ln.split('"')[1] for ln in server_py.splitlines() if "APP_VERSION =" in ln][0]
-check("静态资源 ?v= 与 APP_VERSION 同步", ("?v=" + ver.lstrip("v")) in html, ver)
-check("大版本不低于 v110", int(ver.lstrip("v")) >= 110, ver)
+check("静态资源 ?v= 与 APP_VERSION 同步", ("?v=" + ver.lstrip("v").replace(".", "")) in html, ver)
+check("大版本不低于 v110", int(ver.lstrip("v").split(".")[0]) >= 110, ver)
 check("上限常量可调", worker.COVER_INVALID_MAX >= 1, str(worker.COVER_INVALID_MAX))
 
 print("\n" + "=" * 56)

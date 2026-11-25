@@ -284,11 +284,12 @@ check("任务公开字段带 autopost 标记", any(t.get("autopost") for t in r.
 
 # --------------------------------------------------------- 8. 版本号与静态接线
 print("\n[8] 版本号同步与接线")
-ver_num = int(server.APP_VERSION.lstrip("v"))
+ver_num = int(server.APP_VERSION.lstrip("v").split(".")[0])
+ver_tag = server.APP_VERSION.lstrip("v").replace(".", "")
 check("APP_VERSION 不低于 v112", ver_num >= 112, server.APP_VERSION)
 html = open(os.path.join(BASE, "web", "index.html"), encoding="utf-8").read()
 check("静态资源 ?v= 与 APP_VERSION 同步",
-      f"style.css?v={ver_num}" in html and f"app.js?v={ver_num}" in html)
+      f"style.css?v={ver_tag}" in html and f"app.js?v={ver_tag}" in html)
 check("页面含自动投稿 UI", "apRules" in html and "apSave" in html and "录播自动投稿" in html)
 js = open(os.path.join(BASE, "web", "app.js"), encoding="utf-8").read()
 check("前端保存/刷新/扫描函数齐全", all(k in js for k in ("apSave", "apRefresh", "apScanNow", "apCollect")))

@@ -113,9 +113,9 @@ check("禁止转载进入模板 payload", "no_reprint: $(\"noReprint\")" in js)
 check("套用模板时恢复禁止转载", '$("noReprint").checked = !!p.no_reprint' in js)
 check("从模板页套用时对齐下拉", '$("tplSelect").value = String(t.id)' in js)
 
-ver = "v" + str(int(server.APP_VERSION.lstrip("v")))
+tag = server.APP_VERSION.lstrip("v").replace(".", "")
 check("静态资源 ?v= 与 APP_VERSION 同步",
-      f"?v={ver.lstrip('v')}" in html and ver == server.APP_VERSION, server.APP_VERSION)
+      f"?v={tag}" in html and server.APP_VERSION.startswith("v"), server.APP_VERSION)
 
 print("\n" + "=" * 56)
 print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")

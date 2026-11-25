@@ -30,7 +30,7 @@ WEB_DIR = os.path.join(BASE_DIR, "web")
 UPLOAD_DIR = os.path.join(store.DATA_DIR, "uploads")
 COVER_DIR = os.path.join(store.DATA_DIR, "covers")
 
-APP_VERSION = "v117"
+APP_VERSION = "v117.1"
 
 app = Flask(__name__, static_folder=WEB_DIR, static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = None  # 视频文件大，不限制
@@ -561,6 +561,7 @@ def _public_task(t: Dict[str, Any]) -> Dict[str, Any]:
         "tags": t.get("tags") or [],
         "tid": t.get("tid"),
         "copyright": t.get("copyright"),
+        "source": t.get("source") or "",
         "no_reprint": bool(t.get("no_reprint")),
         "dynamic": t.get("dynamic") or "",
         "status": t.get("status"),
@@ -1116,6 +1117,7 @@ def publish():
         "tags": task_tags,
         "tid": task_tid,
         "copyright": int(meta.get("copyright") or defaults.get("copyright") or 1),
+        "source": str(meta.get("source") or "").strip(),
         "no_reprint": bool(meta.get("no_reprint", defaults.get("no_reprint"))),
         "dynamic": meta.get("dynamic") or "",
         "season_id": int(meta.get("season_id") or defaults.get("season_id") or 0),
@@ -1274,7 +1276,7 @@ def task_action(task_id: str):
     elif action == "update":
         worker.clear_cancel(task_id)
         fields = {}
-        for k in ("title", "desc", "dynamic", "tid", "copyright", "no_reprint"):
+        for k in ("title", "desc", "dynamic", "tid", "copyright", "source", "no_reprint"):
             if k in body:
                 fields[k] = body[k]
         if "tags" in body:

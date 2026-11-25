@@ -153,8 +153,8 @@ check("前端识别 cover 暂停原因并显示倒计时",
       'reason === "cover"' in app_js and "封面被 B站 拒收" in app_js)
 check("前端保存 coverResumeAt", "coverResumeAt" in app_js)
 ver = [ln.split('"')[1] for ln in server_py.splitlines() if "APP_VERSION =" in ln][0]
-check("版本号与静态资源 ?v= 同步", ("?v=" + ver.lstrip("v")) in html, ver)
-check("大版本不低于 v107", int(ver.lstrip("v")) >= 107, ver)
+check("版本号与静态资源 ?v= 同步", ("?v=" + ver.lstrip("v").replace(".", "")) in html, ver)
+check("大版本不低于 v107", int(ver.lstrip("v").split(".")[0]) >= 107, ver)
 
 print("\n" + "=" * 56)
 print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")

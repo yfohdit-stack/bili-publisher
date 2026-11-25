@@ -391,6 +391,9 @@
       row.style.opacity = isReprint ? ".45" : "1";
       row.title = isReprint ? "转载稿件不适用" : "";
     }
+    // 转载稿需要填来源（留空自动填「转载」），自制稿隐藏该输入框
+    const sf = $("sourceField");
+    if (sf) sf.style.display = isReprint ? "" : "none";
   }
 
   // 合集属于账号，ID 不能跨账号使用。这里按「当前生效账号」记录选择：
@@ -468,6 +471,7 @@
       updateCounters();
     }
     if (d.copyright) $("copyrightSelect").value = String(d.copyright);
+    if ($("sourceInput")) $("sourceInput").value = d.source || "";
     syncCopyright();
   }
 
@@ -1473,6 +1477,7 @@
     if (Array.isArray(p.tags)) { state.tags = p.tags.slice(0, 10); renderTags(); }
     if (p.tid) $("tidSelect").value = String(p.tid);
     if (p.copyright) $("copyrightSelect").value = String(p.copyright);
+    if ($("sourceInput")) $("sourceInput").value = p.source || "";
     if ($("noReprint")) $("noReprint").checked = !!p.no_reprint;
     syncCopyright();
     // 编辑态只是把参数载进来改，别顺手在账号下建合集
@@ -1539,6 +1544,7 @@
       tags: state.tags,
       tid: Number($("tidSelect").value),
       copyright: Number($("copyrightSelect").value),
+      source: ($("sourceInput") && $("sourceInput").value.trim()) || "",
       // 禁止转载也是投稿设置的一部分，跟其余勾选项一起存进模板
       no_reprint: $("noReprint") && $("noReprint").checked ? 1 : 0,
       // 合集除了 ID 还要存名字：换账号套用时靠它找同名合集
@@ -2194,6 +2200,7 @@
       tags: state.tags,
       tid: Number($("tidSelect").value) || 21,
       copyright: Number($("copyrightSelect").value) || 1,
+      source: ($("sourceInput") && $("sourceInput").value.trim()) || "",
       no_reprint: $("noReprint").checked,
       season_id: Number($("seasonSelect").value) || 0,
       no_disturbance: $("noPush") && $("noPush").checked ? 1 : 0,
@@ -2381,6 +2388,7 @@
     state.tags = [];
     $("tagInput").value = "";
     $("copyrightSelect").value = "1";
+    if ($("sourceInput")) $("sourceInput").value = "";
     $("noReprint").checked = false;
     if ($("seasonSelect")) $("seasonSelect").value = "0";
     rememberSeason(0);      // 恢复默认也清掉本账号的合集记忆，下次切回来不再自动带上

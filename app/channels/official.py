@@ -112,6 +112,9 @@ async def _publish(task: Dict[str, Any], cfg: Dict[str, Any],
         cover=cover,
         tags=[str(t).strip() for t in (task.get("tags") or []) if str(t).strip()],
         original=int(task.get("copyright") or 1) == 1,
+        # B站对转载稿（copyright=2）强制要求「转载来源」，留空会报 21021。
+        # 用户没填时统一兜底为「转载」，保证投稿能过；来源 ≤200 字由库校验。
+        source=(str(task.get("source") or "").strip() or "转载"),
         no_reprint=bool(task.get("no_reprint")),
         dynamic=(task.get("dynamic") or None),
         delay_time=delay,

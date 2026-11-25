@@ -403,6 +403,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     tags         TEXT DEFAULT '[]',
     tid          INTEGER DEFAULT 21,
     copyright    INTEGER DEFAULT 1,
+    source       TEXT DEFAULT '',      -- 转载来源：copyright=2 时B站必填，留空时提交阶段兜底「转载」
     no_reprint   INTEGER DEFAULT 0,
     dynamic      TEXT DEFAULT '',
     cover_path   TEXT DEFAULT '',
@@ -488,6 +489,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE tasks ADD COLUMN cover_hits INTEGER DEFAULT 0")
         if "autopost_meta" not in cols:
             conn.execute("ALTER TABLE tasks ADD COLUMN autopost_meta TEXT DEFAULT ''")
+        if "source" not in cols:
+            conn.execute("ALTER TABLE tasks ADD COLUMN source TEXT DEFAULT ''")
         # 老库删字段：早期版本给每个任务存过上传通道，现在固定单一通道，
         # 这一列已无任何代码读取。SQLite 3.35+ 才支持 DROP COLUMN，失败就留着
         # （不占用逻辑，读表时也无人再用），不影响任何功能。
@@ -522,7 +525,7 @@ def _backfill_legacy_accounts(conn: sqlite3.Connection) -> None:
 
 TASK_FIELDS = (
     "id", "created_at", "updated_at", "finished_at", "status", "stage", "progress",
-    "title", "desc", "tags", "tid", "copyright", "no_reprint", "dynamic",
+    "title", "desc", "tags", "tid", "copyright", "source", "no_reprint", "dynamic",
     "cover_path", "publish_at", "season_id", "topic_id", "topic_name", "mission_id", "no_disturbance",
     "is_only_self", "speed", "cleanup", "schedule_mode", "account_id",
     "files", "bvid", "aid",
@@ -560,6 +563,7 @@ def _build_task(payload: Dict[str, Any]) -> Dict[str, Any]:
         "tags": payload.get("tags") or [],
         "tid": int(payload.get("tid") or 21),
         "copyright": int(payload.get("copyright") or 1),
+        "source": (payload.get("source") or "").strip(),
         "no_reprint": 1 if payload.get("no_reprint") else 0,
         "dynamic": payload.get("dynamic") or "",
         "cover_path": payload.get("cover_path") or "",

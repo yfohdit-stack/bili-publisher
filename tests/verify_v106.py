@@ -248,7 +248,7 @@ check("额度数字进入 /api/tasks 指纹（账本变了也会重建响应）"
       'q.get("count", "")' in server_py and 'q.get("pending", "")' in server_py)
 ver = [ln.split('"')[1] for ln in server_py.splitlines() if "APP_VERSION =" in ln][0]
 sr = html.splitlines()[7]
-check("APP_VERSION 与静态资源 ?v= 同步", ("?v=" + ver.lstrip("v")) in html, ver)
+check("APP_VERSION 与静态资源 ?v= 同步", ("?v=" + ver.lstrip("v").replace(".", "")) in html, ver)
 
 print("\n" + "=" * 56)
 print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
