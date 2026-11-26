@@ -932,23 +932,71 @@ def delete_template(template_id: int) -> None:
 
 # ---------------------------------------------------------------- 自动投稿台账（v112）
 
-def autopost_is_seen(path: str, size: int, mtime: float) -> bool:
-    """是否已有任务占用该路径。
+# 终态：只有这些状态下的 seen 记录才按签名比对；活动任务无条件占位。
+_AUTOPOST_TERMINAL = ("success", "failed", "cancelled", "blocked", "interrupted")
+
+
+def autopost_seen_hit(row, size: int, mtime: float) -> bool:
+    """seen 判定的唯一实现（纯函数，不查库）。
+
+    单条查询（``autopost_is_seen``）与批量查询（``autopost_seen_batch`` 的调用方）
+    都走这里，避免两处各写一份判定、日后改一处漏一处。
 
     活动任务无论签名是否变化都占住路径，避免扫描器在 worker 复核前另建任务；
     终态任务仍按 路径+体积+mtime 判断，原件被替换后可作为新文件投稿。
     """
+    if row is None:
+        return False
+    status = row["status"] if not isinstance(row, dict) else row.get("status")
+    if status is not None and status not in _AUTOPOST_TERMINAL:
+        return True
+    r_size = row["size"] if not isinstance(row, dict) else row.get("size")
+    r_mtime = row["mtime"] if not isinstance(row, dict) else row.get("mtime")
+    if r_size is None or r_mtime is None:
+        return False
+    return int(r_size) == int(size) and abs(float(r_mtime) - float(mtime)) < 1.0
+
+
+def autopost_is_seen(path: str, size: int, mtime: float) -> bool:
+    """是否已有任务占用该路径。"""
     with _lock:
         conn = connect()
         row = conn.execute(
             "SELECT s.size, s.mtime, t.status FROM autopost_seen s "
             "LEFT JOIN tasks t ON t.id = s.task_id WHERE s.path = ?", (path,)).fetchone()
-    if row is None:
-        return False
-    if row["status"] is not None and row["status"] not in (
-            "success", "failed", "cancelled", "blocked", "interrupted"):
-        return True
-    return int(row["size"]) == int(size) and abs(float(row["mtime"]) - float(mtime)) < 1.0
+    return autopost_seen_hit(row, size, mtime)
+
+
+def autopost_seen_batch(paths: List[str]) -> Dict[str, Dict[str, Any]]:
+    """批量判定一组路径是否已 seen（扫描热路径优化）。
+
+    旧版扫描循环里对每个候选文件调一次 ``autopost_is_seen``，每个文件都是
+    一次 ``SELECT ... LEFT JOIN``：大录播库（数千文件）每轮扫描就是数千次
+    SQL。这里把整批路径一次性查出来，返回 ``{path: {size, mtime, status}}``，
+    调用方在内存里判定，把 N 次 SQL 压成 1 次。未命中的路径不在结果字典里。
+
+    注意：只用返回的 size/mtime/status 复刻 autopost_is_seen 的判定语义即可，
+    不要在查询里加 LIMIT——候选可能上千条，必须一次取全。
+    """
+    if not paths:
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    uniq = list(dict.fromkeys(str(p) for p in paths))
+    with _lock:
+        conn = connect()
+        # SQLite 变量上限通常是 999；分批查询避免「too many SQL variables」
+        for i in range(0, len(uniq), 900):
+            chunk = uniq[i:i + 900]
+            marks = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                "SELECT s.path AS path, s.size AS size, s.mtime AS mtime, "
+                "t.status AS status FROM autopost_seen s "
+                "LEFT JOIN tasks t ON t.id = s.task_id "
+                f"WHERE s.path IN ({marks})", chunk).fetchall()
+            for r in rows:
+                out[r["path"]] = {"size": int(r["size"]), "mtime": float(r["mtime"]),
+                                  "status": r["status"]}
+    return out
 
 
 def autopost_mark(entries: List[Dict[str, Any]], task_id: str,

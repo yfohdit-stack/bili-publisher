@@ -98,9 +98,11 @@ check("恢复默认会清空 source", '$("sourceInput").value = ""' in js)
 
 
 print("\n[5] 版本号同步")
-check("APP_VERSION = v117.1", server.APP_VERSION == "v117.1", server.APP_VERSION)
-check("静态资源 ?v=1171（css/js）",
-      "style.css?v=1171" in html and "app.js?v=1171" in html)
+_major, _minor = (server.APP_VERSION.lstrip("v").split(".") + ["0"])[:2]
+check("APP_VERSION 不低于 v117.1", (int(_major), int(_minor)) >= (117, 1), server.APP_VERSION)
+_tag = server.APP_VERSION.lstrip("v").replace(".", "")
+check("静态资源 ?v= 与 APP_VERSION 同步",
+      f"style.css?v={_tag}" in html and f"app.js?v={_tag}" in html)
 
 print("\n" + "=" * 56)
 print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")

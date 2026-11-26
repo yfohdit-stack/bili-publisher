@@ -51,11 +51,22 @@ _lock = threading.Lock()
 _sig: Dict[str, Tuple[int, float, float]] = {}
 # path -> 上次告警时刻：probe 失败/超体积的提示节流，避免每轮刷日志
 _warned: Dict[str, float] = {}
+# path -> (size, mtime, info)：probe 正结果缓存。只缓存「成功读出时长」的完整
+# 容器——正在录制的文件 duration=0 绝不缓存，否则录完也读不到；签名变了自动失效。
+# 大分P稿/连续多轮扫描里，同一文件不再反复起 ffprobe 子进程。
+_probe_cache: Dict[str, Tuple[int, float, int, Dict[str, Any]]] = {}
 _status: Dict[str, Any] = {"last_scan": 0.0, "last_error": "", "ingested": 0,
                            "pending": []}
 _last_prune = 0.0        # v113：seen 台账上次清理时刻（每小时一次）
 
 _DATE_RE = re.compile(r"(20\d{2})[-_.年/]?(\d{1,2})[-_.月/]?(\d{1,2})")
+
+# 终态判定统一在 store.autopost_seen_hit() 里，这里不再各存一份状态元组。
+
+
+def _seen_from_row(row: Optional[Dict[str, Any]], size: int, mtime: float) -> bool:
+    """基于内存里的批量查询结果判定是否已 seen（语义同 store.autopost_is_seen）。"""
+    return store.autopost_seen_hit(row, size, mtime)
 
 
 def cfg() -> Dict[str, Any]:
@@ -131,29 +142,56 @@ def status() -> Dict[str, Any]:
 # ---------------------------------------------------------------- 扫描
 
 def _candidates(rule: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """遍历一条规则的监视目录，收集候选视频（不做稳定性判定）。"""
+    """遍历一条规则的监视目录，收集候选视频（不做稳定性判定）。
+
+    v118 优化：用 os.scandir 递归替代 os.walk。DirEntry 在 Unix 上缓存了
+    lstat 结果，entry.stat() 直接复用，省掉「walk 列目录 → 再对每个文件
+    os.stat」的第二次系统调用；大目录（数千文件）每轮省下数千次 stat。
+    跳过隐藏目录、归档目录、临时后缀与非视频文件，语义与旧版一致。
+    """
     root = str(rule.get("watch_dir") or "")
     min_bytes = int(rule.get("min_size_mb") or 0) * 1024 * 1024
     out: List[Dict[str, Any]] = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames
-                       if not d.startswith(".") and d != ARCHIVE_DIR]
-        for name in filenames:
+    # 显式栈做深度优先；用 (绝对路径, 相对路径) 成对携带，避免重复 relpath
+    stack: List[Tuple[str, str]] = [(root, "")]
+    while stack:
+        dirpath, rel_dir = stack.pop()
+        try:
+            with os.scandir(dirpath) as it:
+                entries = list(it)
+        except OSError:
+            continue
+        for entry in entries:
+            name = entry.name
             if name.startswith("."):
+                continue
+            try:
+                is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                continue
+            if is_dir:
+                if name == ARCHIVE_DIR:
+                    continue
+                stack.append((entry.path,
+                              os.path.join(rel_dir, name) if rel_dir else name))
                 continue
             low = name.lower()
             if low.endswith(SKIP_TAIL):
                 continue
             if os.path.splitext(low)[1] not in media.VIDEO_EXTS:
                 continue
-            path = os.path.join(dirpath, name)
             try:
-                st = os.stat(path)
+                # 注意：软链必须跟随。follow_symlinks=False 只取链接自身
+                # （十几字节、mtime 是建链时间），会让指向录播文件的软链
+                # 被误判成「太小」，且 mtime 不随目标增长 → 静默期形同虚设。
+                st = (os.stat(entry.path) if entry.is_symlink()
+                      else entry.stat(follow_symlinks=False))
             except OSError:
                 continue
-            rel = os.path.relpath(path, root)
-            out.append({"path": path, "name": name, "rel": rel,
+            rel = os.path.join(rel_dir, name) if rel_dir else name
+            out.append({"path": entry.path, "name": name, "rel": rel,
                         "size": int(st.st_size), "mtime": float(st.st_mtime),
+                        "ino": int(st.st_ino),
                         "too_small": st.st_size < min_bytes})
     return out
 
@@ -171,8 +209,43 @@ def _stable(f: Dict[str, Any], rule: Dict[str, Any], now: float) -> bool:
     return (now - first_seen >= need) and (now - mtime >= need)
 
 
+def _probe_cached(f: Dict[str, Any], info: Dict[str, Any]) -> None:
+    """探测成功（时长>0）时按签名写入缓存，供同轮/后续轮复用。"""
+    if float(info.get("duration") or 0) <= 0:
+        return
+    with _lock:
+        _probe_cache[f["path"]] = (int(f.get("size") or 0),
+                                   float(f.get("mtime") or 0),
+                                   int(f.get("ino") or 0), info)
+
+
+def _probe_cache_hit(f: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """签名一致且上次探测成功时返回缓存的 info，否则 None。
+
+    签名 = 体积 + mtime + inode。加 inode 是为了排除「同一路径被原地覆盖成
+    同尺寸文件」（OBS 定时覆盖固定文件名、体积恰好对齐）时命中旧时长的情况。
+    """
+    with _lock:
+        hit = _probe_cache.get(f["path"])
+    if not hit:
+        return None
+    size, mtime, ino, info = hit
+    if (int(f.get("size") or 0) == size
+            and int(f.get("ino") or 0) == ino
+            and abs(float(f.get("mtime") or 0) - mtime) < 1.0
+            and float(info.get("duration") or 0) > 0):
+        return info
+    return None
+
+
 def _probe_ready(f: Dict[str, Any], now: float) -> Tuple[bool, Dict[str, Any]]:
-    """ffprobe 能读出时长才算容器完整。没装 ffprobe 时退化为静默期判定。"""
+    """ffprobe 能读出时长才算容器完整。没装 ffprobe 时退化为静默期判定。
+
+    v118：命中签名缓存直接返回，省掉一次 ffprobe 子进程。
+    """
+    hit = _probe_cache_hit(f)
+    if hit is not None:
+        return True, hit
     info = media.probe(f["path"])
     if not media.have_ffmpeg():
         _throttled_warn("__ffmpeg_missing__", now,
@@ -180,6 +253,7 @@ def _probe_ready(f: Dict[str, Any], now: float) -> Tuple[bool, Dict[str, Any]]:
                         "建议安装后再长期无人值守运行")
         return True, info
     if float(info.get("duration") or 0) > 0:
+        _probe_cached(f, info)
         return True, info
     _throttled_warn(f["path"], now,
                     f"自动投稿：《{f['name']}》已静置但读不出时长，可能仍在录制或文件损坏，继续等待")
@@ -260,6 +334,11 @@ def scan_once(c: Optional[Dict[str, Any]] = None, now: Optional[float] = None,
             if p not in alive:
                 _sig.pop(p, None)
                 _warned.pop(p, None)
+                _probe_cache.pop(p, None)
+        # 缓存条目数上限保护：即便扫描目录很大也不让缓存无限膨胀
+        if len(_probe_cache) > 5000:
+            for p in list(_probe_cache)[:len(_probe_cache) - 5000]:
+                _probe_cache.pop(p, None)
         _status["last_scan"] = now
         _status["last_error"] = "；".join(errors)
         _status["pending"] = pending[:80]
@@ -340,9 +419,11 @@ def _scan_rule(rule: Dict[str, Any], now: float,
     alive.update(f["path"] for f in files)
     max_bytes = int(store.load_config().get("max_file_mb") or 8192) * 1024 * 1024
     rname = str(rule.get("name") or rule.get("watch_dir") or "")
+    # 一次 SQL 取回本规则全部候选的 seen 状态，替代逐文件查询（数千文件 → 1 次 SQL）
+    seen_rows = store.autopost_seen_batch([f["path"] for f in files])
     unseen: List[Dict[str, Any]] = []
     for f in files:
-        if store.autopost_is_seen(f["path"], f["size"], f["mtime"]):
+        if _seen_from_row(seen_rows.get(f["path"]), f["size"], f["mtime"]):
             continue
         if f["too_small"]:
             continue
@@ -431,13 +512,41 @@ def _ingest_group(members: List[Dict[str, Any]], rule: Dict[str, Any],
                   streamer: str, date: str, group_key: str, now: float) -> int:
     """一组文件入队。超过 max_parts 自动拆成多个稿件。返回入队稿件数。"""
     members = sorted(members, key=lambda f: (f["mtime"], f["name"]))
-    # probe 门槛：任一文件容器不完整就整组继续等
+    # probe 门槛：任一文件容器不完整就整组继续等。
+    # v118：缓存命中的直接复用；未命中的用 probe_many 并行起 ffprobe
+    #（多分P稿原来逐个串行探测，20P 就是 20 次串行子进程，现在并行）。
     infos: Dict[str, Dict[str, Any]] = {}
+    need_probe: List[Dict[str, Any]] = []
     for f in members:
-        ok, info = _probe_ready(f, now)
-        if not ok:
-            return 0
-        infos[f["path"]] = info
+        hit = _probe_cache_hit(f)
+        if hit is not None:
+            infos[f["path"]] = hit
+        else:
+            need_probe.append(f)
+    if need_probe:
+        if media.have_ffmpeg():
+            probed = media.probe_many([f["path"] for f in need_probe])
+            # probe_many 正常按输入顺序等长返回；万一被截断，宁可不是错配着
+            # 往下走（会把时长安到别的分P上），这一轮直接放弃、下轮再试。
+            if len(probed) != len(need_probe):
+                _throttled_warn("__probe_mismatch__", now,
+                                "自动投稿：ffprobe 返回数量与文件数不一致，本轮跳过，下轮重试")
+                return 0
+            for f, info in zip(need_probe, probed):
+                if float(info.get("duration") or 0) <= 0:
+                    _throttled_warn(
+                        f["path"], now,
+                        f"自动投稿：《{f['name']}》已静置但读不出时长，可能仍在录制或文件损坏，继续等待")
+                    return 0
+                _probe_cached(f, info)
+                infos[f["path"]] = info
+        else:
+            # 没装 ffprobe：退化为静默期判定（与 _probe_ready 行为一致）
+            _throttled_warn("__ffmpeg_missing__", now,
+                            "自动投稿：未安装 ffmpeg/ffprobe，目前仅按静置期判断录制完成；"
+                            "建议安装后再长期无人值守运行")
+            for f in need_probe:
+                infos[f["path"]] = media.probe(f["path"])
 
     cfg_all = store.load_config()
     defaults = cfg_all.get("defaults") or {}
