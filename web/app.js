@@ -55,6 +55,7 @@
     config: null,
     account: null,
     accounts: [],
+    activeAccount: "",
     quota: null,
     quotaBusy: false,   // 额度统计请求进行中，避免连点重复打 B站
     env: null,
@@ -78,6 +79,8 @@
     quotaResumeAt: 0,      // 额度预计腾出空位/解封的时刻，用于倒计时
     coverResumeAt: 0,      // 封面被拒收后自动重试的时刻，用于倒计时
     quotaBanUntil: 0,      // 24h 投稿封禁截止（额度归零）时刻
+    rateUntil: 0,          // 接口限流冷却截止时刻
+    rateWait: 0,           // 冷却总时长，用于进度条
     quotaToast: false,
     autopost: null,        // v112 录播自动投稿：config + 运行状态（bootstrap / api/autopost）
     uploading: false,
@@ -271,7 +274,6 @@
     if (!first) refreshOverview("bootstrap");
   }
 
-  // 合集列表，登录后才拉得到；失败不打扰用户，只把提示写在旁边
   /* ---------------------------------------------------------- 话题 */
   function setTopic(t, opts) {
     state.topic = { id: Number(t.id) || 0, name: t.name || "", mission: Number(t.mission_id) || 0 };
@@ -614,9 +616,8 @@
     }, 5 * 60 * 1000);
   }
 
-  // force=true 时即使还在上传文件也要拉一次：上传期间队列照样要能显示新任务，
-  // 旧实现里这个「不抢带宽」的短路让加入队列后的刷新全部静默失效，
-  // 用户要等到下一次自然轮询（退避后最长 20 秒）才看见任务。
+  // force=true 时即使还在上传文件也拉一次：上传期间新入队的任务要立刻显示，
+  // 否则得等下一轮自然轮询（退避后最长 20 秒）。
   async function pollTasks(force) {
     if (state.uploading && !force) return;   // 上传文件时不主动抢带宽（强制刷新除外）
     try {
@@ -633,7 +634,6 @@
       renderRateBanner();
       renderTasks(r.counts);
       if (state.view === "all") renderArchives();
-      $("btnPauseQueue").textContent = state.paused ? "继续队列" : "暂停队列";
       // 签名不含倒计时 message：等待中的定时任务每分钟改文案不会让退避失效
       const sig = (r.tasks || []).map(
         (t) => t.id + ":" + t.status + ":" + t.progress + ":" + t.stage).join("|")
@@ -881,7 +881,6 @@
   }
 
   /* ---------------------------------------------------------- 队列 */
-  /* ---------------------------------------------------------- 工具栏 */
   // 视图切换时立刻同步工具栏，避免要等下一次 2.2s 轮询才隐藏/显示
   function syncToolbarForView() {
     const toolbar = document.querySelector(".queue-toolbar");
@@ -913,7 +912,7 @@
     state.taskFilter = (fromChip && state.taskFilter === v && v !== "") ? "" : v;
     state.page = 1;
     state.sig = "";
-    // 胶囊只属于「本软件投稿」视图，若当前在稿件库则先切回来
+    // 胶囊只属于「队列」视图，若当前在「全部稿件」则先切回来
     if (state.view === "all") studioSetView("queue", { render: false });
     renderTasks();
   }
@@ -935,9 +934,6 @@
     if (!f) return tasks;
     return tasks.filter((t) => {
       const st = t.status || "";
-      if (f === "active") {
-        return ["queued", "uploading", "waiting_schedule", "blocked"].indexOf(st) >= 0;
-      }
       if (f === "pending") {
         return ["queued", "waiting_schedule"].indexOf(st) >= 0;
       }
@@ -951,11 +947,11 @@
   function renderTasks(counts) {
     const list = $("queueList");
     syncToolbarForView();
+    if (counts) state.counts = counts;   // 先更新计数再同步概览条，避免用到上一轮的数字
     syncOverview();
     if (state.view === "all") return renderArchives();
     const tasks = filterTasks(state.tasks || []);
     const filtering = !!state.taskFilter;
-    if (counts) state.counts = counts;
     const cs = state.counts || {};
     // 胶囊显示全量统计，不随筛选变化（点胶囊才是切换筛选）
     $("statTotal").textContent = (state.tasks || []).length;
@@ -966,7 +962,6 @@
       (cs.interrupted || 0) + (cs.cancelled || 0);
     $("btnPauseQueue").textContent = state.paused ? "继续队列" : "暂停队列";
     syncStatChips();
-    syncOverview();
 
     // 每页 10 条，翻页后只渲染当前页
     const pages = Math.max(1, Math.ceil(tasks.length / PAGE_SIZE));
@@ -1161,7 +1156,10 @@
       $("editTags").value = (a.tag || "").split(",").filter(Boolean).join(", ");
       $("editOnlySelf").value = a.is_only_self ? "1" : "0";
       fillEditTid(a.tid);
-      $("editCoverImg").src = a.cover ? "/api/proxy/cover?u=" + encodeURIComponent(a.cover) : "";
+      // 无封面时不能写 src=""，浏览器会把当前页面地址当图片去请求
+      const coverImg = $("editCoverImg");
+      if (a.cover) coverImg.src = "/api/proxy/cover?u=" + encodeURIComponent(a.cover);
+      else coverImg.removeAttribute("src");
       $("editPartInfo").textContent = "共 " + (a.videos || []).length + " 个分P";
       $("btnReplaceVideo").disabled = (a.videos || []).length > 1;
       editStatus("");
@@ -2052,7 +2050,8 @@
         stopQrLogin();
         $("qrTip").className = "qr-tip err";
         $("qrTip").textContent = r.message || "登录失败";
-      }    } catch (e) {
+      }
+    } catch (e) {
       /* 网络抖动就再等下一轮 */
     }
   }
@@ -2168,7 +2167,7 @@
       renderQuota();
       renderSettings();
       $("cookieRaw").value = "";
-      toast("登录成功：" + (r.account.uname || ""), "ok", 3200);
+      toast("登录成功：" + ((r.account && r.account.uname) || ""), "ok", 3200);
       refreshOverview("login");
       loadSeasons(true);
     } catch (e) {
@@ -2186,12 +2185,12 @@
 
   function buildFormData(files, opts) {
     const fd = new FormData();
-    files.forEach((f) => fd.append("files", f.file));
-    if (state.coverFile) fd.append("cover", state.coverFile);
-
-    const list = files || state.files;
     const partTitles = {};
-    list.forEach((f, i) => { partTitles[i] = f.partTitle || f.file.name; });
+    files.forEach((f, i) => {
+      fd.append("files", f.file);
+      partTitles[i] = f.partTitle || f.file.name;
+    });
+    if (state.coverFile) fd.append("cover", state.coverFile);
 
     const meta = {
       mode: opts && opts.mode ? opts.mode : state.mode,
@@ -2220,7 +2219,7 @@
     return { fd: fd, meta: meta };
   }
 
-  function uploadBlock(fd, label, onProgress) {
+  function uploadBlock(fd, onProgress) {
     return new Promise((resolve) => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", location.origin + "/api/publish", true);
@@ -2255,6 +2254,8 @@
       $("publishAt").focus();
       return;
     }
+    // 定时方式要在成功后清表单之前记下，提交结束时据此决定提示文案
+    const localSchedule = !!$("publishAt").value && $("scheduleMode").value === "local";
 
     const bar = $("uploadBar");
     const fill = $("uploadFill");
@@ -2275,7 +2276,7 @@
         // 多分P是一个稿件，必须整包提交
         const built = buildFormData(files, { mode: "multi", title: $("titleInput").value.trim() });
         txt.textContent = "正在传送 " + total + " 个文件（多P合并）0%";
-        const res = await uploadBlock(built.fd, "multi", (pct, loaded, all) => {
+        const res = await uploadBlock(built.fd, (pct, loaded, all) => {
           fill.style.width = pct + "%";
           txt.textContent = "正在传送多P " + pct + "% · " + fmtBytes(loaded) + " / " + fmtBytes(all);
         });
@@ -2297,7 +2298,7 @@
           });
           const label = "第 " + (i + 1) + "/" + total + " 个 · 已入队 " + queued;
           txt.textContent = label + " · 正在传送 0%";
-          const res = await uploadBlock(built.fd, label, (pct, loaded, all) => {
+          const res = await uploadBlock(built.fd, (pct, loaded, all) => {
             fill.style.width = Math.round(((i + pct / 100) / total) * 100) + "%";
             txt.textContent = label + " · " + pct + "% · " + fmtBytes(loaded) + " / " + fmtBytes(all);
           });
@@ -2341,8 +2342,7 @@
       toast("提交失败：" + e.message, "err", 4600);
       if (queued) toast("已成功入队 " + queued + " 个，其余未提交", "ok", 4600);
     } finally {
-      // 先把上传标记放掉，再强制刷新队列：旧实现在 uploading=false 之前就调
-      // pollTasks()，被同一个守卫短路掉，入队后队列要等下一轮轮询才更新。
+      // 先放开上传标记再强制刷新：pollTasks 的 uploading 守卫会把提前调用的刷新短路掉
       state.uploading = false;
       renderLoginState();
       fill.style.width = "0";
@@ -2350,18 +2350,15 @@
       await pollTasks(true);
     }
 
-    if ($("publishAt").value) {
-      const mode = $("scheduleMode").value;
-      if (mode === "local") {
-        toast("已在本地排队，到点程序自动上传（期间请保持程序运行）", "ok", 4000);
-      }
+    // resetCompose 已清空 publishAt，这里只能用提交前记下的 localSchedule 判断
+    if (localSchedule && queued) {
+      toast("已在本地排队，到点程序自动上传（期间请保持程序运行）", "ok", 4000);
     }
   }
 
   function resetCompose() {
     // 批量投稿时，分区 / 标签 / 简介 / 合集 / 话题 / 模板这些「可复用设置」
-    // 应该留着，只清掉属于这一批稿件的文件、标题、封面和定时时间。
-    // 旧实现一次性全清，投第二个视频要重新填一遍。
+    // 留着，只清掉属于这一批稿件的文件、标题、封面和定时时间。
     state.files = [];
     state.coverFile = null;
     state.coverPreviewUrl = "";
@@ -2400,9 +2397,7 @@
     if ($("tplSelect")) $("tplSelect").value = "";
     // 分区先归零，再套用设置里的默认参数（分区 / 标签 / 简介 / 创作类型）
     if ($("tidSelect").options.length) $("tidSelect").selectedIndex = 0;
-    applyDefaults();
-    // 统一刷新渲染与计数
-    syncCopyright();
+    applyDefaults();          // 内部已同步创作类型，这里只需刷新其余渲染与计数
     renderTags();
     updateCounters();
     updateAdvCount();
@@ -2680,31 +2675,18 @@
 
     // 队列
     $("queuePager").addEventListener("click", (e) => {
+      // 页码跳转由输入框回车触发（见下方 keydown），这里只处理上一页 / 下一页
       const ab = e.target.closest("[data-arch]");
       if (ab && !ab.disabled) {
-        const kind = ab.dataset.arch;
-        if (kind === "goto") loadArchives(Number(ab.dataset.p));
-        else if (kind === "jump") {
-          const box = $("archJump");
-          const n = Math.max(1, parseInt((box && box.value) || "0", 10) || 0);
-          if (n) loadArchives(n);
-        } else if (kind === "next") loadArchives(state.archPage + 1);
-        else loadArchives(state.archPage - 1);
+        loadArchives(ab.dataset.arch === "next" ? state.archPage + 1 : state.archPage - 1);
         return;
       }
       const btn = e.target.closest("[data-page]");
       if (!btn || btn.disabled) return;
       const pages = Math.max(1, Math.ceil(filterTasks(state.tasks || []).length / PAGE_SIZE));
-      const kind = btn.dataset.page;
-      if (kind === "jump") {
-        const box = $("queueJump");
-        const n = Math.max(1, parseInt((box && box.value) || "0", 10) || 0);
-        if (n) state.page = Math.min(pages, n);
-      } else {
-        state.page = kind === "next"
-          ? Math.min(pages, state.page + 1)
-          : Math.max(1, state.page - 1);
-      }
+      state.page = btn.dataset.page === "next"
+        ? Math.min(pages, state.page + 1)
+        : Math.max(1, state.page - 1);
       renderTasks();
     });
 
@@ -2781,8 +2763,7 @@
       } catch (e) { toast(e.message, "err"); }
     });
     $("btnRefresh").addEventListener("click", async () => {
-      // 按当前视图刷各自的数据：全部稿件刷 B站列表 + 顶部件数统计，其余刷本地队列。
-      // 以前只重拉列表、不更新概览数字，点了像没反应，容易被误读成「刷的是队列」。
+      // 按当前视图刷各自的数据：全部稿件刷 B站列表，其余刷本地队列；两者都重取概览数字。
       const btn = $("btnRefresh");
       const isArch = state.view === "all";
       const label = btn.textContent;
@@ -2810,11 +2791,15 @@
     });
     $("btnClearLogView").addEventListener("click", async () => {
       if (!confirm("确定清空全部日志吗？此操作不可恢复。")) return;
-      const r = await api("/api/logs", { method: "DELETE" });
-      state.glogs = r.logs || [];
-      state.glogsSig = "";
-      renderGlobalLogs();
-      toast("日志已清空", "ok", 1500);
+      try {
+        const r = await api("/api/logs", { method: "DELETE" });
+        state.glogs = r.logs || [];
+        state.glogsSig = "";
+        renderGlobalLogs();
+        toast("日志已清空", "ok", 1500);
+      } catch (e) {
+        toast("清空失败：" + e.message, "err");
+      }
     });
 
     // 额度：顶栏胶囊与「剩余额度」概览格是同一件事
@@ -2897,13 +2882,20 @@
     if ($("btnClearDone")) $("btnClearDone").addEventListener("click", clearDoneTasks);
 
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") closeDrawer();
-      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submitPublish();
+      if (e.key === "Escape") {
+        if ($("editModal").classList.contains("open")) closeEdit();
+        else closeDrawer();
+        return;
+      }
+      // Ctrl/Cmd+Enter 只在工作台表单上是「加入队列」快捷键；
+      // 编辑弹窗 / 设置抽屉里的文本框不能借这个组合键触发投稿
+      const inOverlay = e.target && e.target.closest && e.target.closest("#editModal, #drawer");
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !inOverlay) submitPublish();
     });
   }
 
   /* ---------------------------------------------------------- v76 Studio 外壳 */
-  // 左侧 Rail 导航：工作台 / 队列 / 全部稿件 / 模板 / 运行日志，均为独立视图
+  // 左侧 Rail 导航：工作台 / 队列 / 全部稿件 / 模板 / 自动投稿 / 运行日志，均为独立视图
   function setNum(id, v) {
     const el = $(id);
     if (el) el.textContent = v;
@@ -2993,9 +2985,8 @@
     state.ovBusy = state.ovBusy || {};
     state.ovSeq = state.ovSeq || {};
     const cached = state.ovStats[part];
-    // 账号累计按统计日（12:00 换一份）；稿件计数 90 秒 TTL —— 与后端 ARCHIVE_TTL 同一口径。
-    // 之前对 archive 是「有缓存就直接 return」，导致后端 90 秒 TTL 实际不生效、
-    // 停在「全部稿件」时数字长期不更新；这里改成按时间戳判断，过期就重取。
+    // 账号累计按统计日（12:00 换一份）；稿件计数 90 秒 TTL —— 与后端 ARCHIVE_TTL 同一口径，
+    // 按时间戳判断是否过期，而不是「有缓存就直接 return」。
     if (!force && cached) {
       const fresh = part === "archive"
         ? (Date.now() - Number(cached.at || 0) < OV_ARCHIVE_TTL_MS)
@@ -3115,8 +3106,7 @@
     const meta = STUDIO_META[view] || STUDIO_META.workbench;
     const crumb = $("crumb");
     if (crumb) crumb.textContent = meta[0];
-    // 五个视图共用同一个页头（标题→横幅→内容），模板/日志不再自带一份：
-    // 自带的那份在横幅之后，视觉会变成「横幅在上、标题在下」，与其它页面不一致。
+    // 所有视图共用同一个页头（标题→横幅→内容），保证各页面顺序一致
     if ($("viewEyebrow")) $("viewEyebrow").textContent = meta[1];
     if ($("viewTitle")) $("viewTitle").textContent = meta[2];
     if ($("viewSub")) $("viewSub").textContent = meta[3];

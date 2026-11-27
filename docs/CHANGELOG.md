@@ -1,6 +1,29 @@
-# 演进与关键设计（v98 → v118）
+# 演进与关键设计（v98 → v119）
 
-> 本文档记录本项目的核心演进与关键设计，便于接手维护。代码版本以 `app/server.py` 中的 `APP_VERSION` 为准（当前 **v118**）。
+> 本文档记录本项目的核心演进与关键设计，便于接手维护。代码版本以 `app/server.py` 中的 `APP_VERSION` 为准（当前 **v119**）。
+
+## 〇、v119 要点（2026-11-27）：前端排查——修缺陷、删死代码与重复描述
+
+只动 `web/`（`app.js` / `index.html` / `style.css`），后端接口未改。
+
+修复（均为纯前端缺陷）：
+
+- **本地定时提示从未显示**：`submitPublish` 成功后 `resetCompose()` 已把 `publishAt` 清空，随后再读它永远为空，「已在本地排队，到点程序自动上传」一次都没弹过。现在在清表单前记下 `localSchedule`，且只在真的入队时提示。
+- **Ctrl/Cmd+Enter 误触发投稿**：全局快捷键没有排除编辑弹窗 / 设置抽屉，在它们的文本框里按这个组合键会把背后工作台里已选的稿件投出去。现在只在弹层之外生效。
+- **Esc 关不掉编辑弹窗**：原来只关抽屉；现在弹窗打开时优先关弹窗。
+- **清空日志失败无提示**：`DELETE /api/logs` 没有 try/catch，失败时 Promise 未处理、界面没反应。现在提示「清空失败」。
+- 编辑弹窗无封面时写 `src=""` 会让浏览器把当前页面地址当图片请求；改为移除 `src`。粘贴 Cookie 成功提示对 `account` 判空。
+- `renderTasks` 里 `syncOverview()` 调了两次，且第一次用的是上一轮的计数；改为先更新计数再同步一次。
+
+清理：
+
+- 不可达分支：`filterTasks` 的 `active`（没有对应胶囊）、分页 click 里的 `goto`/`jump`（跳转由输入框回车处理）、`uploadBlock` 未用的 `label`、`buildFormData` 的 `files || state.files`、`pollTasks` 里与 `renderTasks` 重复的暂停按钮文案。
+- `index.html`：删掉被 CSS 隐藏多年的顶栏品牌块（「本地队列」副标题也早已过期）；自动投稿页那段长说明与复选框 / 规则字段重复，只保留不重复的部分。
+- `style.css`（2038 → 1851 行）：删除 HTML/JS 从未引用的选择器（旧视图开关 `view-switch/vs-btn`、旧稿件行 `arch-row .chip/.ttl/.edit-btn`、日志 `lg-who`、Rail 底部 `rail-mini` 等）、被后置规则完全覆盖的首个 `:root` 色板与 v70 深色变量块、重复的 `[hidden]` 兜底、21 个从未被引用的设计变量（`--accent`、`--danger`、`--run`、`--fs-xs…` 等）。
+- 注释：去掉「旧实现…以前…」这类历史叙述，只保留代码现在的行为与原因；修正放错位置 / 重复的段落注释。
+- 保留 `lv-error/success/warn`：它们由 JS 按 `'lv-' + level` 动态拼接，静态搜索看不到引用。
+
+验证：新增 `tests/verify_v119.py`（38 项，含 `filterTasks` 真跑与「CSS 不得出现无引用 class」的反向护栏）；`verify_v118.py` 的精确版本断言改为「不低于 v118」。另用 Playwright 在同一页面分别套用新旧 CSS，6 个视图 + 设置抽屉 × 明暗主题逐元素比对 computed style 与尺寸，0 差异；`verify_ui_v116`（24 项）、`verify_ui_v117`（9 项）通过；全部 20 套离线回归通过。
 
 ## 〇、v118 要点（2026-11-26）：自动投稿扫描热路径优化
 

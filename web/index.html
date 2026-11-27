@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>B站投稿台</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23fb7299'/%3E%3Cpath d='M9 10.5v11a1 1 0 0 0 1.5.86l9-5.5a1 1 0 0 0 0-1.72l-9-5.5A1 1 0 0 0 9 10.5z' fill='%23fff'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=118">
+<link rel="stylesheet" href="/static/style.css?v=119">
 </head>
 <body>
 
@@ -58,15 +58,6 @@
       <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
     </button>
     <div class="crumb"><span>投稿台</span><span class="sep">/</span><b id="crumb">工作台</b></div>
-    <div class="brand">
-      <div class="brand-mark" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none"><path d="M7 6.2v11.6a1 1 0 0 0 1.53.85l9.2-5.8a1 1 0 0 0 0-1.7L8.53 5.35A1 1 0 0 0 7 6.2z" fill="#fff"/></svg>
-      </div>
-      <div class="brand-text">
-        <span class="brand-title">B站投稿台</span>
-        <span class="brand-sub">本地队列</span>
-      </div>
-    </div>
     <div class="spacer"></div>
 
     <span class="ver-chip" id="appVer" title="程序版本"></span>
@@ -358,7 +349,7 @@
         <div class="kv"><span class="k">状态</span><span class="v" id="apStatus">未启用</span></div>
         <div class="hint" id="apPending" style="margin:6px 0 0;"></div>
         <div class="hint" id="apRecent" style="margin:6px 0 0;"></div>
-        <div class="hint" style="margin:10px 0 0;">还在录制的文件（大小/修改时间仍在变、读不出时长）绝不会上传；入队后源文件若被续写或改动，上传前会复核签名并退回重新判定。投稿成功后原件移入监视目录下「已投稿」子文件夹；失败/取消的原件留在原地，可在队列里重试。删除任务=放弃该稿，文件不会被自动投回。</div>
+        <div class="hint" style="margin:10px 0 0;">入队后源文件若被续写或改动，上传前会复核并退回重新判定；失败 / 取消的原件留在原地，可在队列里重试；删除任务视为放弃该稿，文件不会自动投回。</div>
       </div>
     </div>
   </section>
@@ -642,6 +633,6 @@
 
 <div class="toast-wrap" id="toastWrap"></div>
 
-<script src="/static/app.js?v=118"></script>
+<script src="/static/app.js?v=119"></script>
 </body>
 </html>

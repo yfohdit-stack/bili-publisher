@@ -240,7 +240,7 @@ print("\n[6] 版本号与静态资源同步")
 server = importlib.import_module("app.server")
 html = open(os.path.join(BASE, "web", "index.html"), encoding="utf-8").read()
 tag = server.APP_VERSION.lstrip("v").replace(".", "")
-check("APP_VERSION = v118", server.APP_VERSION == "v118", server.APP_VERSION)
+check("APP_VERSION 不低于 v118", int(server.APP_VERSION.lstrip("v").split(".")[0]) >= 118, server.APP_VERSION)
 check("静态资源 ?v=118（css/js）",
       f"style.css?v={tag}" in html and f"app.js?v={tag}" in html)
 
